@@ -17,9 +17,9 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
 
-from prompt_library.prompts import PROMPT_REGISTRY, PromptType
-from retriever.retrieval import Retriever
-from utils.model_loader import ModelLoader
+from product_assistant.prompt_library.prompts import PROMPT_REGISTRY, PromptType
+from product_assistant.retriever.retrieval import Retriever
+from product_assistant.utils.model_loader import ModelLoader
 import asyncio
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
