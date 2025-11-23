@@ -1,7 +1,7 @@
 import importlib.metadata
 
 packages=['langchain', 'langchain_core', 'python-dotenv', 'pydantic',
-          'streamlit', 'fastapi', 'uvicorn']
+          'streamlit', 'fastapi', 'uvicorn', "langchain-aws"]
 for package in packages:
     try:
         version = importlib.metadata.version(package)
