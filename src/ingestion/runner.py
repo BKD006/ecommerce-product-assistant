@@ -6,16 +6,14 @@ Responsible for orchestrating:
 - Hierarchical chunking
 - Qdrant storage (Bedrock embeddings)
 
-Supports:
-- Full ingestion
-- Single-file re-ingestion
+Designed for API-based ingestion (FastAPI).
 """
 
-import argparse
+import os
 from pathlib import Path
 from typing import List
 
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 from src.ingestion.parser import DoclingPolicyParser
 from src.ingestion.chunker import HierarchicalChunker
@@ -23,25 +21,41 @@ from src.ingestion.vectorstore import PolicyVectorStore
 
 from src.exception.custom_exception import ProductAssistantException
 from src.logger import GLOBAL_LOGGER as log
+from dotenv import load_dotenv
 
+load_dotenv()
 
-POLICY_DIR = "data/policies"
-COLLECTION_NAME = "support_policies"
+# -------------------------------------------------
+# Environment Configuration
+# -------------------------------------------------
+
+POLICY_DIR = os.getenv("POLICY_DIR", "data/uploads")
+COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "support_policies")
 
 
 class PolicyIngestionRunner:
     """
     High-level ingestion orchestrator.
+    Intended to be used from API layer only.
     """
 
     def __init__(self):
         try:
-            log.info("Initializing PolicyIngestionRunner")
+            log.info(
+                "Initializing PolicyIngestionRunner",
+                extra={
+                    "policy_dir": POLICY_DIR,
+                    "collection_name": COLLECTION_NAME,
+                },
+            )
 
-            self.parser = DoclingPolicyParser(POLICY_DIR)
+            self.policy_dir = POLICY_DIR
+            self.collection_name = COLLECTION_NAME
+
+            self.parser = DoclingPolicyParser(self.policy_dir)
             self.chunker = HierarchicalChunker()
             self.store = PolicyVectorStore(
-                collection_name=COLLECTION_NAME
+                collection_name=self.collection_name
             )
 
             log.info("PolicyIngestionRunner initialized successfully")
@@ -55,7 +69,13 @@ class PolicyIngestionRunner:
     # FULL INGESTION
     # -------------------------------------------------
 
-    def run_full_ingestion(self) -> None:
+    def run_full_ingestion(self) -> int:
+        """
+        Runs ingestion for all policy documents.
+
+        Returns:
+            int: total vector count after ingestion
+        """
         try:
             log.info("Starting full ingestion pipeline")
 
@@ -82,13 +102,12 @@ class PolicyIngestionRunner:
                 extra={"total_vectors": total_vectors},
             )
 
+            return total_vectors
+
         except ProductAssistantException:
             raise
         except Exception as e:
-            log.error(
-                "Full ingestion failed unexpectedly",
-                exc_info=True,
-            )
+            log.error("Full ingestion failed", exc_info=True)
             raise ProductAssistantException(
                 "Full ingestion pipeline failed", e
             )
@@ -97,14 +116,20 @@ class PolicyIngestionRunner:
     # SINGLE FILE RE-INGESTION
     # -------------------------------------------------
 
-    def reingest_file(self, file_name: str) -> None:
+    def reingest_file(self, file_name: str) -> int:
+        """
+        Re-ingests a single policy file.
+
+        Returns:
+            int: total vector count after re-ingestion
+        """
         try:
             log.info(
                 "Starting single-file re-ingestion",
                 extra={"file_name": file_name},
             )
 
-            file_path = Path(POLICY_DIR) / file_name
+            file_path = Path(self.policy_dir) / file_name
 
             if not file_path.exists():
                 raise ProductAssistantException(
@@ -114,95 +139,56 @@ class PolicyIngestionRunner:
             # Delete existing vectors
             self.store.delete_by_source(file_name)
 
-            # Parse only target file
+            # Parse target file only
             section_docs = self._parse_single_file(file_name)
 
             log.info(
-                "Section parsing for file completed",
+                "Section parsing completed",
                 extra={"section_count": len(section_docs)},
             )
 
             chunks = self.chunker.chunk(section_docs)
 
             log.info(
-                "Chunking for file completed",
+                "Chunking completed",
                 extra={"chunk_count": len(chunks)},
             )
 
             self.store.add_documents(chunks)
 
+            total_vectors = self.store.count()
+
             log.info(
                 "Re-ingestion completed successfully",
-                extra={"file_name": file_name},
+                extra={"total_vectors": total_vectors},
             )
+
+            return total_vectors
 
         except ProductAssistantException:
             raise
         except Exception as e:
-            log.error(
-                "Single-file re-ingestion failed",
-                exc_info=True,
-            )
+            log.error("Re-ingestion failed", exc_info=True)
             raise ProductAssistantException(
                 "Re-ingestion pipeline failed", e
             )
 
     # -------------------------------------------------
-    # INTERNAL HELPERS
+    # INTERNAL HELPER
     # -------------------------------------------------
 
     def _parse_single_file(self, file_name: str) -> List[Document]:
-        """
-        Parse only a specific file without scanning entire directory.
-        """
         try:
-            parser = DoclingPolicyParser(POLICY_DIR)
-
+            parser = DoclingPolicyParser(self.policy_dir)
             all_docs = parser.parse()
 
-            filtered_docs = [
+            return [
                 doc for doc in all_docs
                 if doc.metadata.get("source") == file_name
             ]
 
-            return filtered_docs
-
         except Exception as e:
             raise ProductAssistantException(
-                f"Failed parsing file during re-ingestion: {file_name}",
+                f"Failed parsing file: {file_name}",
                 e,
             )
-
-
-# -------------------------------------------------
-# CLI ENTRYPOINT
-# -------------------------------------------------
-
-if __name__ == "__main__":
-
-    arg_parser = argparse.ArgumentParser(
-        description="Policy Ingestion CLI"
-    )
-
-    arg_parser.add_argument(
-        "--file",
-        type=str,
-        help="Re-ingest a specific policy file (e.g. refund_policy.pdf)",
-    )
-
-    args = arg_parser.parse_args()
-
-    runner = PolicyIngestionRunner()
-
-    try:
-        if args.file:
-            runner.reingest_file(args.file)
-        else:
-            runner.run_full_ingestion()
-
-    except ProductAssistantException as e:
-        log.critical(
-            "Ingestion terminated due to critical error",
-            exc_info=True,
-        )
-        raise
