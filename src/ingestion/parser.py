@@ -3,18 +3,18 @@ Docling-Based Policy Parser
 
 Responsible for:
 - Loading PDF policy documents
-- Extracting structured sections using Docling
+- Extracting structured content using Docling
 - Converting them into LangChain Documents
 - Attaching consistent metadata
 
-This module is ingestion-only and does not perform chunking.
+Uses markdown export for stable section extraction.
 """
 
 from pathlib import Path
 from typing import List
 
 from docling.document_converter import DocumentConverter
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 from src.exception.custom_exception import ProductAssistantException
 from src.logger import GLOBAL_LOGGER as log
@@ -23,6 +23,7 @@ from src.logger import GLOBAL_LOGGER as log
 class DoclingPolicyParser:
     """
     Parses policy PDFs into structured section-level LangChain Documents.
+    Uses markdown export for reliable structure extraction.
     """
 
     def __init__(self, policy_dir: str):
@@ -34,9 +35,10 @@ class DoclingPolicyParser:
             extra={"policy_dir": str(self.policy_dir)},
         )
 
-    # -------------------------------------------------
-    # Public API
-    # -------------------------------------------------
+    # ==========================================================
+    # PUBLIC API
+    # ==========================================================
+
     def parse(self) -> List[Document]:
         """
         Parse all PDF files inside the policy directory.
@@ -68,17 +70,14 @@ class DoclingPolicyParser:
         except ProductAssistantException:
             raise
         except Exception as e:
-            log.error(
-                "Unexpected failure during policy parsing",
-                exc_info=True,
-            )
+            log.error("Policy parsing failed", exc_info=True)
             raise ProductAssistantException(
                 "Policy parsing pipeline failed", e
             )
 
-    # -------------------------------------------------
-    # Internal Helpers
-    # -------------------------------------------------
+    # ==========================================================
+    # INTERNAL HELPERS
+    # ==========================================================
 
     def _validate_directory(self) -> None:
         if not self.policy_dir.exists():
@@ -99,30 +98,41 @@ class DoclingPolicyParser:
 
     def _parse_single_file(self, pdf_path: Path) -> List[Document]:
         """
-        Parse a single PDF into section-level Documents.
+        Parse a single PDF into section-level Documents
+        using markdown structure.
         """
-
         try:
             policy_type = pdf_path.stem.replace("_policy", "")
 
             result = self.converter.convert(pdf_path)
             structured_doc = result.document
 
+            # Use markdown export (stable API)
+            markdown_text = structured_doc.export_to_markdown()
+
+            if not markdown_text:
+                raise ProductAssistantException(
+                    f"No content extracted from {pdf_path.name}"
+                )
+
+            sections = self._split_markdown_sections(markdown_text)
+
             file_documents: List[Document] = []
 
-            for section in structured_doc.sections:
-                section_text = (section.text or "").strip()
+            for title, content in sections:
 
-                if not section_text:
+                content = content.strip()
+
+                if not content:
                     continue
 
                 file_documents.append(
                     Document(
-                        page_content=section_text,
+                        page_content=content,
                         metadata={
                             "source": pdf_path.name,
                             "policy_type": policy_type,
-                            "section_title": section.title or "Untitled Section",
+                            "section_title": title,
                             "doc_type": "policy",
                             "file_path": str(pdf_path),
                         },
@@ -148,3 +158,44 @@ class DoclingPolicyParser:
             raise ProductAssistantException(
                 f"Failed parsing file: {pdf_path.name}", e
             )
+
+    # ==========================================================
+    # MARKDOWN SECTION SPLITTER
+    # ==========================================================
+
+    def _split_markdown_sections(self, markdown_text: str):
+        """
+        Splits markdown text into (title, content) tuples
+        using heading markers (#, ##, ###).
+        """
+
+        sections = []
+        current_title = "Introduction"
+        current_content = []
+
+        lines = markdown_text.splitlines()
+
+        for line in lines:
+            stripped = line.strip()
+
+            if stripped.startswith("#"):
+                # Save previous section
+                if current_content:
+                    sections.append(
+                        (current_title, "\n".join(current_content))
+                    )
+
+                # New section
+                current_title = stripped.lstrip("#").strip()
+                current_content = []
+
+            else:
+                current_content.append(line)
+
+        # Add last section
+        if current_content:
+            sections.append(
+                (current_title, "\n".join(current_content))
+            )
+
+        return sections
