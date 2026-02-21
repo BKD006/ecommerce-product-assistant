@@ -32,7 +32,7 @@ class DoclingPolicyParser:
 
         log.info(
             "DoclingPolicyParser initialized",
-            extra={"policy_dir": str(self.policy_dir)},
+            policy_dir=str(self.policy_dir),
         )
 
     # ==========================================================
@@ -54,7 +54,7 @@ class DoclingPolicyParser:
             for pdf_path in self._get_pdf_files():
                 log.info(
                     "Processing policy file",
-                    extra={"file_name": pdf_path.name},
+                    file_name=pdf_path.name,
                 )
 
                 file_documents = self._parse_single_file(pdf_path)
@@ -62,7 +62,7 @@ class DoclingPolicyParser:
 
             log.info(
                 "Policy parsing completed",
-                extra={"total_sections": len(documents)},
+                total_sections=len(documents),
             )
 
             return documents
@@ -91,7 +91,7 @@ class DoclingPolicyParser:
         if not pdf_files:
             log.warning(
                 "No PDF files found in policy directory",
-                extra={"policy_dir": str(self.policy_dir)},
+                policy_dir=str(self.policy_dir),
             )
 
         return pdf_files
@@ -141,10 +141,8 @@ class DoclingPolicyParser:
 
             log.info(
                 "File parsed successfully",
-                extra={
-                    "file_name": pdf_path.name,
-                    "sections_extracted": len(file_documents),
-                },
+                file_name=pdf_path.name,
+                sections_extracted=len(file_documents),
             )
 
             return file_documents
@@ -152,7 +150,7 @@ class DoclingPolicyParser:
         except Exception as e:
             log.error(
                 "Failed to parse individual policy file",
-                extra={"file_name": pdf_path.name},
+                file_name=pdf_path.name,
                 exc_info=True,
             )
             raise ProductAssistantException(

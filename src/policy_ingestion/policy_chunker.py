@@ -43,10 +43,8 @@ class HierarchicalChunker:
 
         log.info(
             "HierarchicalChunker initialized",
-            extra={
-                "child_chunk_size": child_chunk_size,
-                "child_overlap": child_overlap,
-            },
+            child_chunk_size= child_chunk_size,
+            child_overlap=child_overlap,
         )
 
     # -------------------------------------------------
@@ -73,7 +71,7 @@ class HierarchicalChunker:
 
             log.info(
                 "Hierarchical chunking completed",
-                extra={"total_chunks": len(hierarchical_chunks)},
+                total_chunks= len(hierarchical_chunks)
             )
 
             return hierarchical_chunks
@@ -121,7 +119,7 @@ class HierarchicalChunker:
         except Exception as e:
             log.error(
                 "Failed processing section during chunking",
-                extra={"section_title": section_doc.metadata.get("section_title")},
+                section_title=section_doc.metadata.get("section_title"),
                 exc_info=True,
             )
             raise ProductAssistantException(

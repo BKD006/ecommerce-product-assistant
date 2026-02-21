@@ -15,9 +15,9 @@ from typing import List
 
 from langchain_core.documents import Document
 
-from src.ingestion.parser import DoclingPolicyParser
-from src.ingestion.chunker import HierarchicalChunker
-from src.ingestion.vectorstore import PolicyVectorStore
+from src.policy_ingestion.policy_parser import DoclingPolicyParser
+from src.policy_ingestion.policy_chunker import HierarchicalChunker
+from src.policy_ingestion.policy_vectorstore import PolicyVectorStore
 
 from src.exception.custom_exception import ProductAssistantException
 from src.logger import GLOBAL_LOGGER as log
@@ -43,10 +43,8 @@ class PolicyIngestionRunner:
         try:
             log.info(
                 "Initializing PolicyIngestionRunner",
-                extra={
-                    "policy_dir": POLICY_DIR,
-                    "collection_name": COLLECTION_NAME,
-                },
+                policy_dir= POLICY_DIR,
+                collection_name=COLLECTION_NAME
             )
 
             self.policy_dir = POLICY_DIR
@@ -83,14 +81,14 @@ class PolicyIngestionRunner:
 
             log.info(
                 "Section parsing completed",
-                extra={"section_count": len(section_docs)},
+                section_count=len(section_docs),
             )
 
             chunks = self.chunker.chunk(section_docs)
 
             log.info(
                 "Hierarchical chunking completed",
-                extra={"chunk_count": len(chunks)},
+                chunk_count=len(chunks),
             )
 
             self.store.add_documents(chunks)
@@ -99,7 +97,7 @@ class PolicyIngestionRunner:
 
             log.info(
                 "Full ingestion completed successfully",
-                extra={"total_vectors": total_vectors},
+                total_vectors=total_vectors,
             )
 
             return total_vectors
@@ -126,7 +124,7 @@ class PolicyIngestionRunner:
         try:
             log.info(
                 "Starting single-file re-ingestion",
-                extra={"file_name": file_name},
+                file_name=file_name,
             )
 
             file_path = Path(self.policy_dir) / file_name
@@ -144,14 +142,14 @@ class PolicyIngestionRunner:
 
             log.info(
                 "Section parsing completed",
-                extra={"section_count": len(section_docs)},
+                section_count=len(section_docs),
             )
 
             chunks = self.chunker.chunk(section_docs)
 
             log.info(
                 "Chunking completed",
-                extra={"chunk_count": len(chunks)},
+                chunk_count=len(chunks),
             )
 
             self.store.add_documents(chunks)
@@ -160,7 +158,7 @@ class PolicyIngestionRunner:
 
             log.info(
                 "Re-ingestion completed successfully",
-                extra={"total_vectors": total_vectors},
+                total_vectors=total_vectors,
             )
 
             return total_vectors

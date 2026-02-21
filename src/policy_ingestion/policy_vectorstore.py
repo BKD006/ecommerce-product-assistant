@@ -48,7 +48,7 @@ class PolicyVectorStore:
 
             log.info(
                 "Initializing PolicyVectorStore",
-                extra={"collection_name": collection_name},
+                collection_name=collection_name,
             )
 
             # Load embeddings
@@ -93,7 +93,7 @@ class PolicyVectorStore:
             if self.collection_name not in existing_collections:
                 log.info(
                     "Creating Qdrant collection",
-                    extra={"collection_name": self.collection_name},
+                    collection_name=self.collection_name,
                 )
 
                 self.client.create_collection(
@@ -146,7 +146,7 @@ class PolicyVectorStore:
 
             log.info(
                 "Adding documents to vector store",
-                extra={"document_count": len(documents)},
+                document_count=len(documents),
             )
 
             self.vectordb.add_documents(documents)
@@ -173,7 +173,8 @@ class PolicyVectorStore:
         try:
             log.info(
                 "Performing vector search",
-                extra={"top_k": k, "filters": filters},
+                top_k=k,
+                filters=filters or {},
             )
 
             return self.vectordb.similarity_search(
@@ -196,7 +197,7 @@ class PolicyVectorStore:
         try:
             log.info(
                 "Deleting vectors by source file",
-                extra={"source_file": source_file},
+                source_file=source_file,
             )
 
             delete_filter = Filter(
@@ -234,7 +235,7 @@ class PolicyVectorStore:
         try:
             log.info(
                 "Updating policy in vector store",
-                extra={"source_file": source_file},
+                source_file=source_file,
             )
 
             self.delete_by_source(source_file)
