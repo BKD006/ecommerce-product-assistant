@@ -52,7 +52,7 @@ class PolicyVectorStore:
             )
 
             # Load embeddings
-            self.embeddings = ModelLoader().load_embeddings()
+            self.embeddings = ModelLoader().load_embeddings("policy")
 
             # Qdrant Cloud client
             self.client = QdrantClient(
