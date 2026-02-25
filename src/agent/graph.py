@@ -201,10 +201,30 @@ class NovacartAgent:
             - Retrieved policy results
         """
 
+        product_results = state.get("product_results") or []
+        policy_results = state.get("policy_results") or []
+
+        formatted_products = []
+        formatted_policies = []
+
+        counter = 1
+
+        for p in product_results:
+            formatted_products.append(
+                f"[{counter}] Product | {p.get('brand')} | {p.get('category')} | {p.get('price')}\nContent: {p.get('content')}"
+            )
+            counter += 1
+
+        for pol in policy_results:
+            formatted_policies.append(
+                f"[{counter}] Policy | {pol.get('policy_type')} | {pol.get('section_title')}\nContent: {pol.get('content')}"
+            )
+            counter += 1
+
         prompt = final_prompt(
             state["user_query"],
-            state.get("product_results"),
-            state.get("policy_results"),
+            "\n\n".join(formatted_products),
+            "\n\n".join(formatted_policies),
         )
 
         response = self.llm.invoke(
@@ -212,9 +232,6 @@ class NovacartAgent:
         )
 
         state["final_answer"] = response.content
-
-        log.info("Final answer generated")
-
         return state
 
     # =================================================
