@@ -30,7 +30,10 @@ load_dotenv()
 # -------------------------------------------------
 
 POLICY_DIR = os.getenv("POLICY_DIR", "data/uploads")
-COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "support_policies")
+COLLECTION_NAME = os.getenv(
+    "QDRANT_COLLECTION",
+    "novacart_support_policies"
+)
 
 
 class PolicyIngestionRunner:
