@@ -2,6 +2,7 @@ import time
 import uuid
 from typing import Dict, Any, Optional
 import numpy as np
+
 from langsmith import traceable
 from langsmith.run_helpers import trace, get_current_run_tree
 
@@ -14,9 +15,7 @@ from src.memory.redis_memory_manager import RedisMemoryManager
 
 class ObservedAgent:
     """
-    Observability + Memory + LangSmith tracing wrapper for NovacartAgent.
-    Adds session memory, latency tracking, hallucination detection,
-    and structured metadata for production AI monitoring.
+    Observability + Memory + LangSmith tracing wrapper.
     """
 
     def __init__(
@@ -26,23 +25,24 @@ class ObservedAgent:
     ):
         self.agent = agent
         self.memory_manager = memory_manager or RedisMemoryManager()
-        self.embedding_model = ModelLoader().load_embeddings("policy")
+
+        loader = ModelLoader()
+        self.embedding_model = loader.load_embeddings("policy")
 
     # =====================================================
     # HALLUCINATION CHECK
     # =====================================================
 
     def _hallucination_check(self, state: Dict[str, Any], answer: str) -> Dict[str, Any]:
-        """
-        Semantic similarity-based hallucination detector.
-        """
 
         product_results = state.get("product_results") or []
         policy_results = state.get("policy_results") or []
 
         retrieved_text = ""
+
         for r in product_results:
             retrieved_text += " " + (r.get("content") or "")
+
         for r in policy_results:
             retrieved_text += " " + (r.get("content") or "")
 
@@ -54,22 +54,16 @@ class ObservedAgent:
             }
 
         try:
-            answer_vector = np.array(
-                self.embedding_model.embed_query(answer)
-            )
 
-            context_vector = np.array(
-                self.embedding_model.embed_query(retrieved_text)
-            )
+            answer_vector = np.array(self.embedding_model.embed_query(answer))
+            context_vector = np.array(self.embedding_model.embed_query(retrieved_text))
 
-            # Cosine similarity
             similarity = np.dot(answer_vector, context_vector) / (
                 np.linalg.norm(answer_vector) * np.linalg.norm(context_vector)
             )
 
             similarity = float(similarity)
 
-            # Risk scoring
             if similarity > 0.80:
                 risk_score = 0.1
             elif similarity > 0.65:
@@ -97,10 +91,7 @@ class ObservedAgent:
     # =====================================================
 
     @traceable(name="ObservedAgentRun")
-    def run(self, query: str, session_id: Optional[str] = None) -> str:
-        """
-        Executes agent with session memory, observability, and LangSmith tracing.
-        """
+    def run(self, query: str, session_id: Optional[str] = None):
 
         request_id = str(uuid.uuid4())
         start_total = time.time()
@@ -113,40 +104,43 @@ class ObservedAgent:
         )
 
         try:
+
             # =================================================
             # MEMORY LOAD
             # =================================================
+
             memory_context = ""
             memory_message_count = 0
             summary_used = False
 
             if session_id:
+
                 with trace("memory_load"):
+
+                    memory_data = self.memory_manager.load(session_id)
+
                     memory_context = self.memory_manager.build_context(session_id)
 
-                    if memory_context:
-                        memory_message_count = len(
-                            self.memory_manager.load(session_id).get("messages", [])
-                        )
-                        summary_used = bool(
-                            self.memory_manager.load(session_id).get("summary")
-                        )
+                    memory_message_count = len(memory_data.get("messages", []))
+                    summary_used = bool(memory_data.get("summary"))
 
-            # Inject memory into query safely
             enriched_query = query
+
             if memory_context:
                 enriched_query = f"""
-                                Previous Conversation Context:
-                                {memory_context}
+                                    Previous Conversation Context:
+                                    {memory_context}
 
-                                Current User Query:
-                                {query}
+                                    Current User Query:
+                                    {query}
                                 """
 
             # =================================================
             # REASON
             # =================================================
+
             with trace("reason_stage"):
+
                 state = self.agent._reason_node({
                     "user_query": enriched_query,
                     "messages": [],
@@ -166,24 +160,31 @@ class ObservedAgent:
             # =================================================
             # TOOL
             # =================================================
+
             if tool_name != "final":
+
                 with trace("tool_stage"):
                     state = self.agent._tool_node(state)
 
             # =================================================
             # FINAL
             # =================================================
+
             with trace("final_stage"):
                 state = self.agent._final_node(state)
 
             answer = state.get("final_answer", "")
+
             total_latency = time.time() - start_total
 
             # =================================================
             # MEMORY SAVE
             # =================================================
+
             if session_id:
+
                 with trace("memory_update"):
+
                     self.memory_manager.append(
                         session_id=session_id,
                         user_message=query,
@@ -193,13 +194,17 @@ class ObservedAgent:
             # =================================================
             # HALLUCINATION CHECK
             # =================================================
+
             hallucination_metrics = self._hallucination_check(state, answer)
 
             # =================================================
             # LANGSMITH METADATA
             # =================================================
+
             current_run = get_current_run_tree()
+
             if current_run:
+
                 current_run.metadata.update({
                     "request_id": request_id,
                     "tool_used": tool_name,
@@ -222,9 +227,9 @@ class ObservedAgent:
             )
 
             return {
-                    "answer": answer,
-                    "citations": state.get("source_map", {})
-                    }
+                "answer": answer,
+                "citations": state.get("source_map", {})
+            }
 
         except ProductAssistantException as e:
             log.error("agent_request_failed", request_id=request_id, error=str(e))
