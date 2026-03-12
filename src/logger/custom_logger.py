@@ -18,20 +18,11 @@ class CustomLogger:
         - Generates timestamped log files
         - Sends logs to both console and file in JSON format
         - Includes UTC timestamps, log levels, and event names
-
-    Example:
-        >>> logger = CustomLogger().get_logger(__name__)
-        >>> logger.info("User login successful", user_id=123)
-        >>> logger.error("File not found", path="/tmp/data.csv")
     """
 
     def __init__(self, log_dir: str = "logs"):
         """
         Initialize the custom logger and ensure log directory setup.
-
-        Args:
-            log_dir (str): Directory name for storing log files.
-                           Defaults to "logs" inside the current working directory.
         """
         # Ensure the logs directory exists (create if missing)
         self.logs_dir = os.path.join(os.getcwd(), log_dir)

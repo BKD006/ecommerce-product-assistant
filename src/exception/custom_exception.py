@@ -16,25 +16,12 @@ class ProductAssistantException(Exception):
         - Standard Python exceptions
         - `sys` module's `exc_info`
         - Arbitrary exception objects
-
-    Example:
-        >>> try:
-        ...     1 / 0
-        ... except Exception as e:
-        ...     raise ProductAssistantException("Division error", e)
     """
 
     def __init__(self, error_message: str, error_details: Optional[object] = None):
         """
         Initialize the custom exception with a normalized error message and
         extract traceback details.
-
-        Args:
-            error_message (str | Exception): 
-                The main message describing the error.
-                Can be a string or another Exception object.
-            error_details (Optional[object]): 
-                Additional error context (can be `sys`, an Exception, or None).
         """
         # Normalize error message (ensure it's always a string)
         if isinstance(error_message, BaseException):
