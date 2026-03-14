@@ -1,3 +1,4 @@
+import os
 from typing import Dict, Any, List, Optional
 import asyncio
 
@@ -5,6 +6,12 @@ from src.retriever.policy_retriever import HybridPolicyRetriever
 from src.exception.custom_exception import ProductAssistantException
 from src.logger import GLOBAL_LOGGER as log
 
+from dotenv import load_dotenv
+load_dotenv()
+COLLECTION_NAME = os.getenv(
+    "QDRANT_COLLECTION",
+    "novacart_support_policies"
+)
 
 class PolicyTool:
     """
@@ -21,7 +28,7 @@ class PolicyTool:
             log.info("Initializing PolicyTool")
 
             self.retriever = HybridPolicyRetriever(
-                collection_name="support_policies"
+                collection_name=COLLECTION_NAME
             )
 
             log.info("PolicyTool initialized successfully")
@@ -107,7 +114,7 @@ class PolicyTool:
                     "source": metadata.get("source"),
                     "policy_type": metadata.get("policy_type"),
                     "section_title": metadata.get("section_title"),
-                    "content": doc.page_content[:800],  # trimmed
+                    "content": doc.page_content[:800],  # To control prompt size, latency, and cost when the tool output goes into the LLM
                 }
             )
 

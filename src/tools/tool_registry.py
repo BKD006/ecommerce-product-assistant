@@ -2,6 +2,7 @@ from typing import Dict, Callable, Any, Optional
 
 from src.tools.product_tool import ProductTool
 from src.tools.policy_tool import PolicyTool
+
 from src.logger import GLOBAL_LOGGER as log
 from src.exception.custom_exception import ProductAssistantException
 
@@ -10,10 +11,11 @@ class ToolRegistry:
     """
     Central registry for all available agent tools.
 
-    Provides:
-    - Tool lookup by name
-    - Safe execution wrapper
-    - Future extensibility
+    Responsibilities:
+    - Tool registration
+    - Tool lookup
+    - Safe execution
+    - Extensibility for future tools
     """
 
     def __init__(self):
@@ -40,32 +42,58 @@ class ToolRegistry:
     # -------------------------------------------------
 
     def _register_default_tools(self):
+        """
+        Register core tools available to the agent.
+        """
 
-        self.register_tool("product_tool", ProductTool())
-        self.register_tool("policy_tool", PolicyTool())
+        # Product search + brands + categories
+        self.register_tool(
+            "product_tool",
+            ProductTool(),
+        )
+
+        # Policy RAG
+        self.register_tool(
+            "policy_tool",
+            PolicyTool(),
+        )
 
     # -------------------------------------------------
-    # REGISTER NEW TOOL
+    # REGISTER TOOL
     # -------------------------------------------------
 
-    def register_tool(self, name: str, tool_instance: Any):
+    def register_tool(
+        self,
+        name: str,
+        tool_instance: Any,
+    ):
 
         if name in self._tools:
-            log.warning("Tool already registered, overriding", tool=name)
+            log.warning(
+                "Tool already registered, overriding",
+                tool=name,
+            )
 
         self._tools[name] = tool_instance
 
-        log.info("Tool registered", tool=name)
+        log.info(
+            "Tool registered",
+            tool=name,
+        )
 
     # -------------------------------------------------
     # GET TOOL
     # -------------------------------------------------
 
-    def get_tool(self, name: str) -> Optional[Any]:
+    def get_tool(
+        self,
+        name: str,
+    ) -> Optional[Any]:
+
         return self._tools.get(name)
 
     # -------------------------------------------------
-    # EXECUTE TOOL SAFELY
+    # EXECUTE TOOL
     # -------------------------------------------------
 
     def execute(
@@ -73,9 +101,6 @@ class ToolRegistry:
         name: str,
         **kwargs,
     ):
-        """
-        Executes tool safely and returns result.
-        """
 
         tool = self.get_tool(name)
 
@@ -84,13 +109,43 @@ class ToolRegistry:
                 f"Tool '{name}' not found in registry"
             )
 
-        log.info("Executing tool from registry", tool=name)
+        try:
 
-        return tool.run(**kwargs)
+            log.info(
+                "Executing tool",
+                tool=name,
+                parameters=kwargs,
+            )
+
+            result = tool.run(**kwargs)
+
+            log.info(
+                "Tool execution completed",
+                tool=name,
+                result_count=len(result)
+                if isinstance(result, list)
+                else None,
+            )
+
+            return result
+
+        except Exception as e:
+
+            log.error(
+                "Tool execution failed",
+                tool=name,
+                error=str(e),
+            )
+
+            raise ProductAssistantException(
+                f"Execution failed for tool '{name}'",
+                e,
+            )
 
     # -------------------------------------------------
     # LIST TOOLS
     # -------------------------------------------------
 
     def list_tools(self):
+
         return list(self._tools.keys())
