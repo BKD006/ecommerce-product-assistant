@@ -3,7 +3,6 @@ import numpy as np
 import ast
 from typing import List, Dict, Any
 
-
 class ProductCatalogProcessor:
     """
     Loads Flipkart product catalog CSV
@@ -228,7 +227,7 @@ class ProductCatalogProcessor:
             if not pd.isna(row["overall_rating"]):
                 metadata["rating"] = float(row["overall_rating"])
 
-            # 🔥 REMOVE ANY NULL VALUES (CRITICAL)
+            # REMOVE ANY NULL VALUES (CRITICAL)
             metadata = {
                 k: v for k, v in metadata.items()
                 if v is not None and not pd.isna(v)

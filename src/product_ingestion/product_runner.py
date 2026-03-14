@@ -5,9 +5,11 @@ Responsible for:
 - Processing uploaded CSV
 - Transforming products into embedding-ready records
 - Storing them into Pinecone
+- Deleting uploaded file after ingestion
 
 Designed for FastAPI file-upload usage.
 """
+
 from pathlib import Path
 
 from src.product_ingestion.product_loader import ProductCatalogProcessor
@@ -23,18 +25,24 @@ class ProductIngestionRunner:
 
     def __init__(self, index_name: str):
         try:
+
             log.info(
                 "Initializing ProductIngestionRunner",
                 index_name=index_name,
             )
 
-            self.store = ProductVectorStore(index_name=index_name)
+            self.store = ProductVectorStore(
+                index_name=index_name
+            )
 
-            log.info("ProductIngestionRunner initialized successfully")
+            log.info(
+                "ProductIngestionRunner initialized successfully"
+            )
 
         except Exception as e:
             raise ProductAssistantException(
-                "Failed initializing ProductIngestionRunner", e
+                "Failed initializing ProductIngestionRunner",
+                e,
             )
 
     # -------------------------------------------------
@@ -49,29 +57,39 @@ class ProductIngestionRunner:
         Ingest products from uploaded CSV file.
 
         Args:
-            file_path: temporary CSV file path (from FastAPI)
+            file_path: temporary CSV file path
 
         Returns:
             dict: ingestion summary
         """
 
         try:
+
             log.info(
-                "Starting product ingestion from CSV",
+                "Starting product ingestion",
                 file_path=file_path,
             )
 
-            if not Path(file_path).exists():
+            file = Path(file_path)
+
+            if not file.exists():
                 raise ProductAssistantException(
                     f"CSV file not found: {file_path}"
                 )
 
-            processor = ProductCatalogProcessor(file_path)
+            # ----------------------------
+            # Process CSV
+            # ----------------------------
+
+            processor = ProductCatalogProcessor(
+                file_path
+            )
+
             products = processor.process()
 
             if not products:
                 raise ProductAssistantException(
-                    "No valid products found after processing"
+                    "No valid products found"
                 )
 
             log.info(
@@ -79,64 +97,98 @@ class ProductIngestionRunner:
                 product_count=len(products),
             )
 
+            # ----------------------------
+            # Store in Pinecone
+            # ----------------------------
+
             self.store.upsert_products(products)
 
             stats = self.store.describe_index()
 
+            vector_count = None
+            dimension = None
+
+            if isinstance(stats, dict):
+                vector_count = stats.get(
+                    "total_vector_count"
+                )
+                dimension = stats.get(
+                    "dimension"
+                )
+
             log.info(
                 "Product ingestion completed",
-                index_stats=stats or {},
+                vector_count=vector_count,
+                dimension=dimension,
             )
+
+            # ----------------------------
+            # CLEANUP FILE
+            # ----------------------------
+
+            self._delete_file(file)
 
             return {
                 "status": "success",
-                "ingested_products": len(products),
-                "index_stats": stats,
+                "vector_count": vector_count,
+                "dimension": dimension,
             }
 
         except ProductAssistantException:
             raise
+
         except Exception as e:
-            log.error("CSV ingestion failed", exc_info=True)
+
+            log.error(
+                "CSV ingestion failed",
+                exc_info=True,
+            )
+
+            # delete file even if failed
+            self._safe_delete(file_path)
+
             raise ProductAssistantException(
-                "Product CSV ingestion failed", e
+                "Product CSV ingestion failed",
+                e,
             )
 
     # -------------------------------------------------
-    # RE-INGEST SINGLE PRODUCT
+    # DELETE FILE
     # -------------------------------------------------
 
-    def reingest_product(
-        self,
-        file_path: str,
-        product_id: str,
-    ) -> dict:
-        """
-        Re-ingest single product from CSV file.
-        """
+    def _delete_file(self, file: Path):
 
         try:
-            processor = ProductCatalogProcessor(file_path)
-            products = processor.process()
 
-            target = [
-                p for p in products if p["id"] == product_id
-            ]
+            if file.exists():
 
-            if not target:
-                raise ProductAssistantException(
-                    f"Product {product_id} not found"
+                log.info(
+                    "Deleting uploaded file",
+                    file=str(file),
                 )
 
-            self.store.delete_by_product_id(product_id)
-            self.store.upsert_products(target)
-
-            return {
-                "status": "success",
-                "product_id": product_id,
-            }
+                file.unlink()
 
         except Exception as e:
-            raise ProductAssistantException(
-                "Re-ingestion failed", e
+
+            log.warning(
+                "File deletion failed",
+                file=str(file),
+                error=str(e),
             )
+
+    # -------------------------------------------------
+    # SAFE DELETE
+    # -------------------------------------------------
+
+    def _safe_delete(self, file_path: str):
+
+        try:
+
+            file = Path(file_path)
+
+            if file.exists():
+                file.unlink()
+
+        except Exception:
+            pass

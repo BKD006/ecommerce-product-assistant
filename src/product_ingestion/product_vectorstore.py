@@ -79,7 +79,7 @@ class ProductVectorStore:
                 metric="cosine",
                 spec=ServerlessSpec(
                     cloud="aws",
-                    # region="us-east-2",
+                    region="us-east-1",
                 ),
             )
 
@@ -171,37 +171,6 @@ class ProductVectorStore:
             raise ProductAssistantException(
                 "Product search failed", e
             )
-
-    # -------------------------------------------------
-    # DELETE
-    # -------------------------------------------------
-
-    def delete_by_product_id(self, product_id: str) -> None:
-        try:
-            self.index.delete(ids=[product_id])
-            log.info(
-                "Deleted product vector",
-                product_id=product_id,
-            )
-        except Exception as e:
-            raise ProductAssistantException(
-                "Failed deleting product", e
-            )
-
-    def delete_by_filter(self, filters: Dict) -> None:
-        """
-        Delete by metadata filter.
-        Example:
-        {"category": "Clothing"}
-        """
-        try:
-            self.index.delete(filter=filters)
-            log.info("Deleted products by filter")
-        except Exception as e:
-            raise ProductAssistantException(
-                "Failed deleting by filter", e
-            )
-
     # -------------------------------------------------
     # ADMIN
     # -------------------------------------------------

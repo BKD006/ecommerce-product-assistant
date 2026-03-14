@@ -3,7 +3,6 @@ from collections import defaultdict
 import asyncio
 
 from langchain_core.documents import Document
-from src.utils.model_loader import ModelLoader
 from rank_bm25 import BM25Okapi
 
 from src.policy_ingestion.policy_vectorstore import PolicyVectorStore
@@ -17,7 +16,6 @@ class HybridPolicyRetriever:
         self,
         collection_name: str,
         rrf_k: int = 60,
-        max_concurrency: int = 5,
     ):
         """
         Initialize the HybridPolicyRetriever.
@@ -42,7 +40,6 @@ class HybridPolicyRetriever:
             )
 
             self.rrf_k = rrf_k
-            self.max_concurrency = max_concurrency
 
             self._bm25_index = None
             self._bm25_documents: List[Document] = []
@@ -96,7 +93,6 @@ class HybridPolicyRetriever:
     # =================================================
     # ASYNC HYBRID RETRIEVE
     # =================================================
-
     async def retrieve_async(
         self,
         query: str,
@@ -104,34 +100,17 @@ class HybridPolicyRetriever:
         policy_type: Optional[str] = None,
         section_title: Optional[str] = None,
         filters: Optional[Dict] = None,
-    ) -> List[Document]:
-        """
-        Performs hybrid retrieval using:
-
-            1. Dense vector search (Qdrant)
-            2. Sparse lexical search (BM25)
-            3. Reciprocal Rank Fusion (RRF)
-
-        Args:
-            query (str): User search query.
-            k (int): Number of top results to retrieve.
-            policy_type (Optional[str]): Filter by policy category.
-            section_title (Optional[str]): Filter by section name.
-            filters (Optional[Dict]): Additional metadata constraints.
-
-        Returns:
-            List[Document]: Ranked documents after fusion.
-
-        Raises:
-            ProductAssistantException: If retrieval fails.
-        """
+    ):
 
         try:
+
             if not query.strip():
                 raise ProductAssistantException("Query cannot be empty")
 
             metadata_filter = self._build_filter(
-                policy_type, section_title, filters
+                policy_type,
+                section_title,
+                filters,
             )
 
             log.info(
@@ -140,22 +119,37 @@ class HybridPolicyRetriever:
                 top_k=k,
             )
 
-            # Step 1: Dense Retrieval
+            # -----------------------
+            # Dense search (only once)
+            # -----------------------
+
             dense_results = self.store.search(
                 query=query,
                 k=k * 4,
                 filters=metadata_filter,
             )
 
-            # Step 2: Sparse Retrieval
+            if not dense_results:
+                return []
+
+            # -----------------------
+            # BM25 on dense results
+            # -----------------------
+
             sparse_results = self._bm25_search(
                 query=query,
+                documents=dense_results,
                 k=k * 4,
-                metadata_filter=metadata_filter,
             )
 
-            # Step 3: RRF Fusion
-            fused = self._rrf_fusion(dense_results, sparse_results)
+            # -----------------------
+            # RRF fusion
+            # -----------------------
+
+            fused = self._rrf_fusion(
+                dense_results,
+                sparse_results,
+            )
 
             final_results = fused[: k * 3]
 
@@ -168,6 +162,7 @@ class HybridPolicyRetriever:
 
         except ProductAssistantException:
             raise
+
         except Exception as e:
             log.error("Hybrid retrieval failed", exc_info=True)
             raise ProductAssistantException(
@@ -199,37 +194,23 @@ class HybridPolicyRetriever:
     def _bm25_search(
         self,
         query: str,
+        documents: List[Document],
         k: int,
-        metadata_filter: Optional[Dict],
     ) -> List[Document]:
-        """
-        Performs sparse lexical search using BM25.
 
-        Dense results are first retrieved from Qdrant,
-        then ranked using BM25 scoring.
-
-        Args:
-            query (str): Search query.
-            k (int): Number of top results to return.
-            metadata_filter (Optional[Dict]): Metadata constraints.
-
-        Returns:
-            List[Document]: Top-k BM25-ranked documents.
-        """
-
-        docs = self.store.search(
-            query=query,
-            k=100,
-            filters=metadata_filter,
-        )
-
-        if not docs:
+        if not documents:
             return []
 
-        self._build_bm25_index(docs)
+        tokenized_corpus = [
+            doc.page_content.split()
+            for doc in documents
+        ]
+
+        bm25 = BM25Okapi(tokenized_corpus)
 
         tokenized_query = query.split()
-        scores = self._bm25_index.get_scores(tokenized_query)
+
+        scores = bm25.get_scores(tokenized_query)
 
         ranked_indices = sorted(
             range(len(scores)),
@@ -239,7 +220,7 @@ class HybridPolicyRetriever:
 
         top_indices = ranked_indices[:k]
 
-        return [self._bm25_documents[i] for i in top_indices]
+        return [documents[i] for i in top_indices]
 
     # =================================================
     # RRF FUSION

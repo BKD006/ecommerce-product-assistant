@@ -4,7 +4,8 @@ Policy Ingestion Runner
 Responsible for orchestrating:
 - Docling parsing
 - Hierarchical chunking
-- Qdrant storage (Bedrock embeddings)
+- Qdrant storage
+- Delete uploaded files after ingestion
 
 Designed for API-based ingestion (FastAPI).
 """
@@ -25,11 +26,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# -------------------------------------------------
-# Environment Configuration
-# -------------------------------------------------
 
 POLICY_DIR = os.getenv("POLICY_DIR", "data/uploads")
+
 COLLECTION_NAME = os.getenv(
     "QDRANT_COLLECTION",
     "novacart_support_policies"
@@ -37,159 +36,196 @@ COLLECTION_NAME = os.getenv(
 
 
 class PolicyIngestionRunner:
-    """
-    High-level ingestion orchestrator.
-    Intended to be used from API layer only.
-    """
 
     def __init__(self):
+
         try:
+
             log.info(
                 "Initializing PolicyIngestionRunner",
-                policy_dir= POLICY_DIR,
-                collection_name=COLLECTION_NAME
+                policy_dir=POLICY_DIR,
+                collection_name=COLLECTION_NAME,
             )
 
             self.policy_dir = POLICY_DIR
             self.collection_name = COLLECTION_NAME
 
-            self.parser = DoclingPolicyParser(self.policy_dir)
+            self.parser = DoclingPolicyParser(
+                self.policy_dir
+            )
+
             self.chunker = HierarchicalChunker()
+
             self.store = PolicyVectorStore(
                 collection_name=self.collection_name
             )
 
-            log.info("PolicyIngestionRunner initialized successfully")
+            log.info(
+                "PolicyIngestionRunner initialized"
+            )
 
         except Exception as e:
             raise ProductAssistantException(
-                "Failed initializing ingestion runner", e
+                "Failed initializing ingestion runner",
+                e,
             )
 
-    # -------------------------------------------------
-    # FULL INGESTION
-    # -------------------------------------------------
 
-    def run_full_ingestion(self) -> int:
-        """
-        Runs ingestion for all policy documents.
-
-        Returns:
-            int: total vector count after ingestion
-        """
-        try:
-            log.info("Starting full ingestion pipeline")
-
-            section_docs = self.parser.parse()
-
-            log.info(
-                "Section parsing completed",
-                section_count=len(section_docs),
-            )
-
-            chunks = self.chunker.chunk(section_docs)
-
-            log.info(
-                "Hierarchical chunking completed",
-                chunk_count=len(chunks),
-            )
-
-            self.store.add_documents(chunks)
-
-            total_vectors = self.store.count()
-
-            log.info(
-                "Full ingestion completed successfully",
-                total_vectors=total_vectors,
-            )
-
-            return total_vectors
-
-        except ProductAssistantException:
-            raise
-        except Exception as e:
-            log.error("Full ingestion failed", exc_info=True)
-            raise ProductAssistantException(
-                "Full ingestion pipeline failed", e
-            )
-
-    # -------------------------------------------------
+    # =================================================
     # SINGLE FILE RE-INGESTION
-    # -------------------------------------------------
+    # =================================================
 
-    def reingest_file(self, file_name: str) -> int:
-        """
-        Re-ingests a single policy file.
+    def reingest_file(
+        self,
+        file_name: str,
+    ) -> int:
 
-        Returns:
-            int: total vector count after re-ingestion
-        """
         try:
+
             log.info(
-                "Starting single-file re-ingestion",
+                "Reingesting file",
                 file_name=file_name,
             )
 
-            file_path = Path(self.policy_dir) / file_name
+            file_path = (
+                Path(self.policy_dir)
+                / file_name
+            )
 
             if not file_path.exists():
+
                 raise ProductAssistantException(
                     f"File not found: {file_name}"
                 )
 
-            # Delete existing vectors
-            self.store.delete_by_source(file_name)
-
-            # Parse target file only
-            section_docs = self._parse_single_file(file_name)
-
-            log.info(
-                "Section parsing completed",
-                section_count=len(section_docs),
+            self.store.delete_by_source(
+                file_name
             )
 
-            chunks = self.chunker.chunk(section_docs)
-
-            log.info(
-                "Chunking completed",
-                chunk_count=len(chunks),
+            section_docs = (
+                self._parse_single_file(
+                    file_name
+                )
             )
 
-            self.store.add_documents(chunks)
+            chunks = self.chunker.chunk(
+                section_docs
+            )
+
+            self.store.add_documents(
+                chunks
+            )
 
             total_vectors = self.store.count()
 
             log.info(
-                "Re-ingestion completed successfully",
+                "Re-ingestion done",
                 total_vectors=total_vectors,
             )
 
+            # delete only this file
+            self._delete_file(file_path)
+
             return total_vectors
 
-        except ProductAssistantException:
-            raise
         except Exception as e:
-            log.error("Re-ingestion failed", exc_info=True)
-            raise ProductAssistantException(
-                "Re-ingestion pipeline failed", e
+
+            log.error(
+                "Re-ingestion failed",
+                exc_info=True,
             )
 
-    # -------------------------------------------------
-    # INTERNAL HELPER
-    # -------------------------------------------------
+            raise ProductAssistantException(
+                "Re-ingestion failed",
+                e,
+            )
 
-    def _parse_single_file(self, file_name: str) -> List[Document]:
+    # =================================================
+    # PARSE SINGLE
+    # =================================================
+
+    def _parse_single_file(
+        self,
+        file_name: str,
+    ) -> List[Document]:
+
+        parser = DoclingPolicyParser(
+            self.policy_dir
+        )
+
+        docs = parser.parse()
+
+        return [
+            d
+            for d in docs
+            if d.metadata.get("source")
+            == file_name
+        ]
+
+    # =================================================
+    # CLEANUP ALL FILES
+    # =================================================
+
+    def _cleanup_files(self):
+
         try:
-            parser = DoclingPolicyParser(self.policy_dir)
-            all_docs = parser.parse()
 
-            return [
-                doc for doc in all_docs
-                if doc.metadata.get("source") == file_name
-            ]
+            folder = Path(
+                self.policy_dir
+            )
+
+            for file in folder.glob("*"):
+
+                if file.is_file():
+
+                    log.info(
+                        "Deleting file",
+                        file=str(file),
+                    )
+
+                    file.unlink()
 
         except Exception as e:
-            raise ProductAssistantException(
-                f"Failed parsing file: {file_name}",
-                e,
+
+            log.warning(
+                "Cleanup failed",
+                error=str(e),
+            )
+
+    # =================================================
+    # SAFE CLEANUP
+    # =================================================
+
+    def _safe_cleanup(self):
+
+        try:
+            self._cleanup_files()
+        except Exception:
+            pass
+
+    # =================================================
+    # DELETE SINGLE FILE
+    # =================================================
+
+    def _delete_file(
+        self,
+        file_path: Path,
+    ):
+
+        try:
+
+            if file_path.exists():
+
+                log.info(
+                    "Deleting file",
+                    file=str(file_path),
+                )
+
+                file_path.unlink()
+
+        except Exception as e:
+
+            log.warning(
+                "Delete failed",
+                error=str(e),
             )

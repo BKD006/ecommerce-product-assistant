@@ -28,7 +28,6 @@ from src.utils.model_loader import ModelLoader
 from src.exception.custom_exception import ProductAssistantException
 from src.logger import GLOBAL_LOGGER as log
 from dotenv import load_dotenv
-
 load_dotenv()
 
 
@@ -223,7 +222,7 @@ class PolicyVectorStore:
             )
 
     # ==========================================================
-    # UPDATE
+    # UPDATE (Currently not using it but maye be later)
     # ==========================================================
 
     def update_policy(

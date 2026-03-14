@@ -1,7 +1,6 @@
 """
-Hybrid Product Retriever (Dense + BM25 + RRF)
-
-Reranking temporarily disabled.
+Improved Hybrid Product Retriever
+(Dense + BM25 + RRF + Metadata Aggregation support)
 """
 
 from typing import List, Optional, Dict
@@ -23,25 +22,13 @@ class HybridProductRetriever:
         index_name: str,
         rrf_k: int = 60,
     ):
-        """
-        Initialize the HybridProductRetriever.
-
-        Args:
-            index_name (str): Name of the Pinecone index storing products.
-            rrf_k (int): Reciprocal Rank Fusion constant used to
-                        balance ranking influence between dense and sparse results.
-
-        Initializes:
-            - Product vector store connection
-            - RRF fusion configuration
-        """
         try:
             log.info("Initializing HybridProductRetriever")
 
             self.store = ProductVectorStore(index_name=index_name)
             self.rrf_k = rrf_k
 
-            log.info("HybridProductRetriever initialized successfully")
+            log.info("HybridProductRetriever initialized")
 
         except Exception as e:
             raise ProductAssistantException(
@@ -57,93 +44,80 @@ class HybridProductRetriever:
         query: str,
         k: int = 5,
         filters: Optional[Dict] = None,
+        dense_k: int = 25,
     ):
-        """
-        Synchronous wrapper around the async retrieval method.
 
-        This method allows the retriever to be used in non-async
-        contexts (e.g., FastAPI routes, tool execution).
-
-        Args:
-            query (str): User search query.
-            k (int): Number of top results to return.
-            filters (Optional[Dict]): Optional metadata filters such as:
-                - category
-                - brand
-                - min_price
-                - max_price
-                - min_rating
-
-        Returns:
-            List[Document]: Top-k ranked product documents.
-        """
         filters = filters or {}
 
-        return asyncio.run(
-            self.retrieve_async(
-                query=query,
-                k=k,
-                category=filters.get("category"),
-                brand=filters.get("brand"),
-                min_price=filters.get("min_price"),
-                max_price=filters.get("max_price"),
-                min_rating=filters.get("min_rating"),
+        try:
+            return asyncio.run(
+                self.retrieve_async(
+                    query=query,
+                    k=k,
+                    dense_k=dense_k,
+                    category=filters.get("category"),
+                    brand=filters.get("brand"),
+                    min_price=filters.get("min_price"),
+                    max_price=filters.get("max_price"),
+                    min_rating=filters.get("min_rating"),
+                )
             )
-        )
+        except RuntimeError:
+            return asyncio.get_event_loop().run_until_complete(
+                self.retrieve_async(
+                    query=query,
+                    k=k,
+                    dense_k=dense_k,
+                    category=filters.get("category"),
+                    brand=filters.get("brand"),
+                    min_price=filters.get("min_price"),
+                    max_price=filters.get("max_price"),
+                    min_rating=filters.get("min_rating"),
+                )
+            )
 
     # =================================================
-    # ASYNC HYBRID RETRIEVE
+    # HYBRID RETRIEVAL
     # =================================================
 
     async def retrieve_async(
         self,
         query: str,
         k: int = 5,
+        dense_k: int = 25,
         category: Optional[str] = None,
         brand: Optional[str] = None,
         min_price: Optional[float] = None,
         max_price: Optional[float] = None,
         min_rating: Optional[float] = None,
     ):
-        """
-        Performs hybrid product retrieval using:
-
-            1. Dense vector search (Pinecone)
-            2. Sparse lexical ranking (BM25)
-            3. Reciprocal Rank Fusion (RRF)
-
-        Args:
-            query (str): User search query.
-            k (int): Number of final results to return.
-            category (Optional[str]): Filter by product category.
-            brand (Optional[str]): Filter by brand name.
-            min_price (Optional[float]): Minimum price constraint.
-            max_price (Optional[float]): Maximum price constraint.
-            min_rating (Optional[float]): Minimum rating constraint.
-
-        Returns:
-            List[Document]: Ranked product documents.
-
-        Raises:
-            ProductAssistantException: If retrieval execution fails.
-        """
 
         try:
+
             if not query.strip():
                 raise ProductAssistantException("Query cannot be empty")
 
             metadata_filter = self._build_filter(
-                category, brand, min_price, max_price, min_rating
+                category,
+                brand,
+                min_price,
+                max_price,
+                min_rating,
             )
 
-            log.info("Executing hybrid product retrieval")
+            log.info(
+                "Executing hybrid product retrieval",
+                query=query,
+                metadata_filter=metadata_filter,
+            )
 
-            # -------------------------------------------------
-            # Dense Retrieval (Pinecone)
-            # -------------------------------------------------
+            # -------------------------------
+            # Dense Retrieval
+            # -------------------------------
+
             dense_matches = self.store.search(
                 query=query,
-                top_k=10,
+                top_k=dense_k,
                 filters=metadata_filter,
             )
 
@@ -152,55 +126,104 @@ class HybridProductRetriever:
 
             dense_documents = [
                 Document(
-                    page_content=self._build_sparse_text(m["metadata"]),
+                    page_content=self._build_sparse_text(
+                        m["metadata"]
+                    ),
                     metadata=m["metadata"],
                 )
                 for m in dense_matches
             ]
 
-            # -------------------------------------------------
-            # Sparse BM25 Retrieval
-            # -------------------------------------------------
+            # -------------------------------
+            # BM25
+            # -------------------------------
+
             sparse_documents = self._bm25_search(
                 query=query,
                 documents=dense_documents,
-                k=50,
+                k=dense_k,
             )
 
-            # -------------------------------------------------
-            # RRF Fusion
-            # -------------------------------------------------
-            fused = self._rrf_fusion(
+            # -------------------------------
+            # RRF
+            # -------------------------------
+
+            fused_docs = self._rrf_fusion(
                 dense_documents,
                 sparse_documents,
             )
 
-            # -------------------------------------------------
-            # RETURN
-            # -------------------------------------------------
-            return fused[:k]
+            return fused_docs[:k]
 
         except Exception as e:
-            log.error("Hybrid product retrieval failed", exc_info=True)
+            log.error(
+                "Hybrid product retrieval failed",
+                exc_info=True,
+            )
+
             raise ProductAssistantException(
-                "Hybrid product retrieval execution failed", e
+                "Hybrid product retrieval execution failed",
+                e,
             )
 
     # =================================================
-    # SPARSE TEXT BUILDER
+    # NEW — FETCH MANY (FOR BRANDS / CATALOG)
     # =================================================
 
-    def _build_sparse_text(self, metadata: Dict) -> str:
-        """
-        Constructs a structured text representation of product metadata
-        for BM25 sparse ranking.
+    def retrieve_many(
+        self,
+        k: int = 200,
+        filters: Optional[Dict] = None,
+    ) -> List[Dict]:
 
-        Args:
-            metadata (Dict): Product metadata dictionary.
+        filters = filters or {}
 
-        Returns:
-            str: Concatenated textual representation of product attributes.
-        """
+        log.info(
+            "Retrieving many products",
+            k=k,
+            filters=filters,
+        )
+
+        matches = self.store.search(
+            query="*",
+            top_k=k,
+            filters=filters,
+        )
+
+        return matches
+
+    # =================================================
+    # NEW — GET UNIQUE METADATA VALUES
+    # =================================================
+
+    def get_unique_metadata(
+        self,
+        field: str,
+        k: int = 200,
+    ) -> List[str]:
+
+        matches = self.retrieve_many(k=k)
+
+        values = set()
+
+        for m in matches:
+            meta = m.get("metadata", {})
+            val = meta.get(field)
+
+            if val:
+                values.add(str(val))
+
+        return sorted(list(values))
+
+    # =================================================
+    # SPARSE TEXT
+    # =================================================
+
+    def _build_sparse_text(
+        self,
+        metadata: Dict,
+    ) -> str:
+
         return f"""
         {metadata.get('category', '')}
         {metadata.get('sub_category', '')}
@@ -210,7 +233,7 @@ class HybridProductRetriever:
         """
 
     # =================================================
-    # BM25 SEARCH
+    # BM25
     # =================================================
 
     def _bm25_search(
@@ -219,27 +242,16 @@ class HybridProductRetriever:
         documents: List[Document],
         k: int,
     ) -> List[Document]:
-        """
-        Performs sparse lexical search using BM25 over
-        dense-retrieved candidate documents.
-
-        Args:
-            query (str): User search query.
-            documents (List[Document]): Candidate documents from dense retrieval.
-            k (int): Number of top results to return.
-
-        Returns:
-            List[Document]: BM25-ranked documents.
-        """
 
         tokenized_corpus = [
-            doc.page_content.split()
+            doc.page_content.lower().split()
             for doc in documents
         ]
 
         bm25 = BM25Okapi(tokenized_corpus)
 
-        tokenized_query = query.split()
+        tokenized_query = query.lower().split()
+
         scores = bm25.get_scores(tokenized_query)
 
         ranked_indices = sorted(
@@ -253,7 +265,7 @@ class HybridProductRetriever:
         return [documents[i] for i in top_indices]
 
     # =================================================
-    # RRF FUSION
+    # RRF
     # =================================================
 
     def _rrf_fusion(
@@ -261,19 +273,6 @@ class HybridProductRetriever:
         dense_docs: List[Document],
         sparse_docs: List[Document],
     ) -> List[Document]:
-        """
-        Combines dense and sparse results using Reciprocal Rank Fusion (RRF).
-
-        RRF Formula:
-            score += 1 / (rrf_k + rank_position)
-
-        Args:
-            dense_docs (List[Document]): Results from dense vector search.
-            sparse_docs (List[Document]): Results from sparse BM25 ranking.
-
-        Returns:
-            List[Document]: Documents sorted by fused ranking score.
-        """
 
         score_dict = defaultdict(float)
 
@@ -283,7 +282,10 @@ class HybridProductRetriever:
         for rank, doc in enumerate(sparse_docs):
             score_dict[id(doc)] += 1 / (self.rrf_k + rank)
 
-        unique_docs = {id(doc): doc for doc in dense_docs + sparse_docs}
+        unique_docs = {
+            id(doc): doc
+            for doc in dense_docs + sparse_docs
+        }
 
         sorted_docs = sorted(
             unique_docs.values(),
@@ -294,43 +296,33 @@ class HybridProductRetriever:
         return sorted_docs
 
     # =================================================
-    # FILTER BUILDER
+    # FILTER
     # =================================================
 
     def _build_filter(
         self,
-        category: Optional[str],
-        brand: Optional[str],
-        min_price: Optional[float],
-        max_price: Optional[float],
-        min_rating: Optional[float],
+        category,
+        brand,
+        min_price,
+        max_price,
+        min_rating,
     ) -> Optional[Dict]:
-        """
-        Combines dense and sparse results using Reciprocal Rank Fusion (RRF).
-
-        RRF Formula:
-            score += 1 / (rrf_k + rank_position)
-
-        Args:
-            dense_docs (List[Document]): Results from dense vector search.
-            sparse_docs (List[Document]): Results from sparse BM25 ranking.
-
-        Returns:
-            List[Document]: Documents sorted by fused ranking score.
-        """
 
         filter_dict = {}
 
         if category:
-            filter_dict["category"] = category
+            filter_dict["category"] = {"$eq": category}
 
         if brand:
-            filter_dict["brand"] = brand
+            filter_dict["brand"] = {"$eq": brand}
 
         if min_price is not None or max_price is not None:
+
             price_filter = {}
+
             if min_price is not None:
                 price_filter["$gte"] = min_price
+
             if max_price is not None:
                 price_filter["$lte"] = max_price
 
