@@ -1,5 +1,6 @@
 import time
 import uuid
+import os
 from typing import Dict, Any, Optional
 import numpy as np
 
@@ -10,21 +11,28 @@ from src.agent.graph import NovacartAgent
 from src.utils.model_loader import ModelLoader
 from src.logger import GLOBAL_LOGGER as log
 from src.exception.custom_exception import ProductAssistantException
-from src.memory.redis_memory_manager import RedisMemoryManager
 
+from src.memory.redis_memory_manager import RedisMemoryManager
+from src.memory.mongodb_memory_manager import MongoConversationManager
+from dotenv import load_dotenv
+load_dotenv()
 
 class ObservedAgent:
-    """
-    Observability + Memory + LangSmith tracing wrapper.
-    """
 
     def __init__(
         self,
         agent: NovacartAgent,
         memory_manager: Optional[RedisMemoryManager] = None,
     ):
+
         self.agent = agent
         self.memory_manager = memory_manager or RedisMemoryManager()
+
+        # Mongo = source of truth
+        self.mongo_manager = MongoConversationManager(
+            mongo_uri=os.getenv("MONGO_URI"),
+            db_name="rag_system",
+        )
 
         loader = ModelLoader()
         self.embedding_model = loader.load_embeddings("policy")
@@ -33,7 +41,12 @@ class ObservedAgent:
     # HALLUCINATION CHECK
     # =====================================================
 
-    def _hallucination_check(self, state: Dict[str, Any], answer: str) -> Dict[str, Any]:
+    def _hallucination_check(
+        self,
+        state: Dict[str, Any],
+        answer: str,
+        memory_message_count: int,
+    ):
 
         product_results = state.get("product_results") or []
         policy_results = state.get("policy_results") or []
@@ -46,7 +59,16 @@ class ObservedAgent:
         for r in policy_results:
             retrieved_text += " " + (r.get("content") or "")
 
+        # allow memory answers
         if not retrieved_text.strip():
+
+            if memory_message_count > 0:
+                return {
+                    "risk_score": 0.2,
+                    "semantic_similarity": 0.0,
+                    "flag": False,
+                }
+
             return {
                 "risk_score": 0.9,
                 "semantic_similarity": 0.0,
@@ -55,11 +77,17 @@ class ObservedAgent:
 
         try:
 
-            answer_vector = np.array(self.embedding_model.embed_query(answer))
-            context_vector = np.array(self.embedding_model.embed_query(retrieved_text))
+            answer_vector = np.array(
+                self.embedding_model.embed_query(answer)
+            )
+
+            context_vector = np.array(
+                self.embedding_model.embed_query(retrieved_text)
+            )
 
             similarity = np.dot(answer_vector, context_vector) / (
-                np.linalg.norm(answer_vector) * np.linalg.norm(context_vector)
+                np.linalg.norm(answer_vector)
+                * np.linalg.norm(context_vector)
             )
 
             similarity = float(similarity)
@@ -80,6 +108,7 @@ class ObservedAgent:
             }
 
         except Exception:
+
             return {
                 "risk_score": 0.5,
                 "semantic_similarity": 0.0,
@@ -119,41 +148,82 @@ class ObservedAgent:
 
                     memory_data = self.memory_manager.load(session_id)
 
-                    memory_context = self.memory_manager.build_context(session_id)
+                    # fallback to mongo
+                    if (
+                        not memory_data["messages"]
+                        and not memory_data["summary"]
+                    ):
 
-                    memory_message_count = len(memory_data.get("messages", []))
-                    summary_used = bool(memory_data.get("summary"))
+                        mongo_messages = self.mongo_manager.get_conversation(
+                            session_id
+                        )
+
+                        last_user = None
+
+                        for m in mongo_messages:
+
+                            if m["role"] == "user":
+                                last_user = m["content"]
+
+                            else:
+                                if last_user:
+                                    self.memory_manager.append(
+                                        session_id,
+                                        last_user,
+                                        m["content"],
+                                    )
+
+                        memory_data = self.memory_manager.load(session_id)
+
+                    memory_context = self.memory_manager.build_context(
+                        session_id
+                    )
+
+                    memory_message_count = len(
+                        memory_data.get("messages", [])
+                    )
+
+                    summary_used = bool(
+                        memory_data.get("summary")
+                    )
 
             enriched_query = query
 
             if memory_context:
-                enriched_query = f"""
-                                    Previous Conversation Context:
-                                    {memory_context}
 
-                                    Current User Query:
-                                    {query}
-                                """
+                enriched_query = f"""
+Previous Conversation Context:
+{memory_context}
+
+Current User Query:
+{query}
+"""
+
+            # =================================================
+            # INITIAL STATE
+            # =================================================
+
+            state = {
+                "user_query": enriched_query,
+                "messages": [],
+                "iteration": 0,
+                "max_iterations": self.agent.max_iterations,
+                "next_action": None,
+                "reasoning": None,
+                "tool_query": None,
+                "tool_calls": [],
+                "product_results": None,
+                "policy_results": None,
+                "final_answer": None,
+                "citations": None,
+            }
 
             # =================================================
             # REASON
             # =================================================
 
             with trace("reason_stage"):
-
-                state = self.agent._reason_node({
-                    "user_query": enriched_query,
-                    "messages": [],
-                    "iteration": 0,
-                    "max_iterations": self.agent.max_iterations,
-                    "next_action": None,
-                    "reasoning": None,
-                    "tool_query": None,
-                    "tool_calls": [],
-                    "product_results": None,
-                    "policy_results": None,
-                    "final_answer": None,
-                })
+                state = self.agent._reason_node(state)
 
             tool_name = state.get("next_action")
 
@@ -185,6 +255,18 @@ class ObservedAgent:
 
                 with trace("memory_update"):
 
+                    self.mongo_manager.save_message(
+                        session_id,
+                        "user",
+                        query,
+                    )
+
+                    self.mongo_manager.save_message(
+                        session_id,
+                        "assistant",
+                        answer,
+                    )
+
                     self.memory_manager.append(
                         session_id=session_id,
                         user_message=query,
@@ -195,11 +277,11 @@ class ObservedAgent:
             # HALLUCINATION CHECK
             # =================================================
 
-            hallucination_metrics = self._hallucination_check(state, answer)
-
-            # =================================================
-            # LANGSMITH METADATA
-            # =================================================
+            hallucination_metrics = self._hallucination_check(
+                state,
+                answer,
+                memory_message_count,
+            )
 
             current_run = get_current_run_tree()
 
@@ -228,13 +310,25 @@ class ObservedAgent:
 
             return {
                 "answer": answer,
-                "citations": state.get("source_map", {})
+                "citations": state.get("citations"),
             }
 
         except ProductAssistantException as e:
-            log.error("agent_request_failed", request_id=request_id, error=str(e))
+
+            log.error(
+                "agent_request_failed",
+                request_id=request_id,
+                error=str(e),
+            )
+
             raise
 
         except Exception as e:
-            log.error("agent_unexpected_error", request_id=request_id, error=str(e))
+
+            log.error(
+                "agent_unexpected_error",
+                request_id=request_id,
+                error=str(e),
+            )
+
             raise
