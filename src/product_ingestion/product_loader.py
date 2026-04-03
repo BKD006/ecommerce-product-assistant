@@ -138,6 +138,16 @@ class ProductCatalogProcessor:
             "product_category_tree"
         ].apply(lambda x: pd.Series(extract(x)))
 
+        #Keep only top 19 categories
+        top_categories = (
+            df["main_category"]
+            .value_counts()
+            .head(19)
+            .index
+        )
+
+        df = df[df["main_category"].isin(top_categories)].copy()
+
         return df
 
     # -------------------------------------------------
@@ -220,7 +230,7 @@ class ProductCatalogProcessor:
                 "category": row.get("main_category"),
                 "sub_category": row.get("sub_category"),
                 "brand": row.get("brand"),
-                "price": float(row.get("price")),
+                "price": float(row.get("price")) if not pd.isna(row.get("price")) else None,
             }
 
             # Add rating only if exists
