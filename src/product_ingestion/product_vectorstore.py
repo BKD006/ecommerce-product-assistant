@@ -1,13 +1,3 @@
-"""
-Product Vector Store (Pinecone)
-
-Uses:
-- AWS Bedrock (Titan) embeddings
-- Pinecone vector database
-- Full CRUD support
-- Metadata-aware filtering
-"""
-
 from typing import List, Dict, Optional, Any
 import os
 from pinecone import Pinecone, ServerlessSpec
@@ -176,4 +166,28 @@ class ProductVectorStore:
     # -------------------------------------------------
 
     def describe_index(self) -> Dict:
-        return self.index.describe_index_stats()
+        stats = self.index.describe_index_stats()
+        try:
+            # handle both dict and object
+            total_vector_count = (
+                stats.get("total_vector_count")
+                if isinstance(stats, dict)
+                else getattr(stats, "total_vector_count", None)
+            )
+
+            dimension = (
+                stats.get("dimension")
+                if isinstance(stats, dict)
+                else getattr(stats, "dimension", None)
+            )
+
+            return {
+                "total_vector_count": total_vector_count,
+                "dimension": dimension,
+            }
+
+        except Exception:
+            return {
+                "total_vector_count": None,
+                "dimension": None,
+            }

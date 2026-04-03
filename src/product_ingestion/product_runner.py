@@ -1,17 +1,4 @@
-"""
-Product Ingestion Runner (API-ready)
-
-Responsible for:
-- Processing uploaded CSV
-- Transforming products into embedding-ready records
-- Storing them into Pinecone
-- Deleting uploaded file after ingestion
-
-Designed for FastAPI file-upload usage.
-"""
-
 from pathlib import Path
-
 from src.product_ingestion.product_loader import ProductCatalogProcessor
 from src.product_ingestion.product_vectorstore import ProductVectorStore
 from src.exception.custom_exception import ProductAssistantException
@@ -49,19 +36,7 @@ class ProductIngestionRunner:
     # INGEST FROM CSV FILE
     # -------------------------------------------------
 
-    def ingest_csv(
-        self,
-        file_path: str,
-    ) -> dict:
-        """
-        Ingest products from uploaded CSV file.
-
-        Args:
-            file_path: temporary CSV file path
-
-        Returns:
-            dict: ingestion summary
-        """
+    def ingest_csv(self, file_path: str) -> dict:
 
         try:
 
@@ -77,29 +52,48 @@ class ProductIngestionRunner:
                     f"CSV file not found: {file_path}"
                 )
 
-            # ----------------------------
-            # Process CSV
-            # ----------------------------
+            # =================================================
+            # 🔥 STEP 1: UNIFIED PROCESSING
+            # =================================================
 
-            processor = ProductCatalogProcessor(
-                file_path
-            )
+            processor = ProductCatalogProcessor(file_path)
 
-            products = processor.process()
+            df = processor.process_df()   # ✅ SINGLE SOURCE
 
-            if not products:
+            if df.empty:
                 raise ProductAssistantException(
                     "No valid products found"
                 )
 
             log.info(
-                "Product processing completed",
+                "Unified dataset ready",
+                row_count=len(df),
+            )
+
+            # =================================================
+            # 🔥 STEP 2: CONVERT DF → VECTOR FORMAT
+            # =================================================
+
+            df = processor._build_embedding_text(df)
+            df = processor._build_metadata(df)
+
+            products = [
+                {
+                    "id": str(row["pid"]),
+                    "embedding_text": row["embedding_text"],
+                    "metadata": row["metadata"],
+                }
+                for _, row in df.iterrows()
+            ]
+
+            log.info(
+                "Vector transformation completed",
                 product_count=len(products),
             )
 
-            # ----------------------------
-            # Store in Pinecone
-            # ----------------------------
+            # =================================================
+            # 🔥 STEP 3: UPSERT INTO PINECONE
+            # =================================================
 
             self.store.upsert_products(products)
 
@@ -109,12 +103,8 @@ class ProductIngestionRunner:
             dimension = None
 
             if isinstance(stats, dict):
-                vector_count = stats.get(
-                    "total_vector_count"
-                )
-                dimension = stats.get(
-                    "dimension"
-                )
+                vector_count = stats.get("total_vector_count")
+                dimension = stats.get("dimension")
 
             log.info(
                 "Product ingestion completed",
@@ -122,9 +112,9 @@ class ProductIngestionRunner:
                 dimension=dimension,
             )
 
-            # ----------------------------
-            # CLEANUP FILE
-            # ----------------------------
+            # =================================================
+            # CLEANUP
+            # =================================================
 
             self._delete_file(file)
 
@@ -132,6 +122,7 @@ class ProductIngestionRunner:
                 "status": "success",
                 "vector_count": vector_count,
                 "dimension": dimension,
+                "ingested_rows": len(products),  # 🔥 NEW
             }
 
         except ProductAssistantException:
@@ -144,7 +135,6 @@ class ProductIngestionRunner:
                 exc_info=True,
             )
 
-            # delete file even if failed
             self._safe_delete(file_path)
 
             raise ProductAssistantException(
