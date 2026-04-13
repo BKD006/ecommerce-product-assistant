@@ -1,8 +1,3 @@
-"""
-Improved Hybrid Product Retriever
-(Dense + BM25 + RRF + Metadata Aggregation support)
-"""
-
 from typing import List, Optional, Dict
 from collections import defaultdict
 import asyncio
@@ -15,24 +10,26 @@ from src.exception.custom_exception import ProductAssistantException
 from src.logger import GLOBAL_LOGGER as log
 
 
-class HybridProductRetriever:
+class HybridProductRetrieverV2:
 
     def __init__(
         self,
         index_name: str,
         rrf_k: int = 60,
+        category_boost: float = 0.15,
     ):
         try:
-            log.info("Initializing HybridProductRetriever")
+            log.info("Initializing HybridProductRetrieverV2")
 
             self.store = ProductVectorStore(index_name=index_name)
             self.rrf_k = rrf_k
+            self.category_boost = category_boost
 
-            log.info("HybridProductRetriever initialized")
+            log.info("HybridProductRetrieverV2 initialized")
 
         except Exception as e:
             raise ProductAssistantException(
-                "Hybrid product retriever initialization failed", e
+                "Hybrid product retriever V2 initialization failed", e
             )
 
     # =================================================
@@ -46,7 +43,6 @@ class HybridProductRetriever:
         filters: Optional[Dict] = None,
         dense_k: int = 25,
     ):
-
         filters = filters or {}
 
         try:
@@ -77,7 +73,7 @@ class HybridProductRetriever:
             )
 
     # =================================================
-    # HYBRID RETRIEVAL
+    # MAIN RETRIEVAL
     # =================================================
 
     async def retrieve_async(
@@ -91,34 +87,39 @@ class HybridProductRetriever:
         max_price: Optional[float] = None,
         min_rating: Optional[float] = None,
     ):
-
         try:
 
             if not query.strip():
                 raise ProductAssistantException("Query cannot be empty")
 
-            metadata_filter = self._build_filter(
-                category,
-                brand,
-                min_price,
-                max_price,
-                min_rating,
-            )
+            # -----------------------------------
+            # STEP 1: Detect category
+            # -----------------------------------
+            detected_category = None
+
+            if not category:
+                detected_category = await self._detect_category(query)
 
             log.info(
-                "Executing hybrid product retrieval",
-                query=query,
-                metadata_filter=metadata_filter,
+                "Category detection",
+                detected_category=detected_category,
+                user_category=category,
             )
 
-            # -------------------------------
-            # Dense Retrieval
-            # -------------------------------
+            # -----------------------------------
+            # STEP 2: Build filter (ONLY if user provided)
+            # -----------------------------------
+            metadata_filter = self._build_filter(
+                category, brand, min_price, max_price, min_rating
+            )
 
+            # -----------------------------------
+            # STEP 3: Dense Retrieval
+            # -----------------------------------
             dense_matches = self.store.search(
                 query=query,
                 top_k=dense_k,
-                filters=metadata_filter,
+                filters=metadata_filter,   # only user filters
             )
 
             if not dense_matches:
@@ -126,110 +127,84 @@ class HybridProductRetriever:
 
             dense_documents = [
                 Document(
-                    page_content=self._build_sparse_text(
-                        m["metadata"]
-                    ),
+                    page_content=self._build_sparse_text(m["metadata"]),
                     metadata=m["metadata"],
                 )
                 for m in dense_matches
             ]
 
-            # -------------------------------
-            # BM25
-            # -------------------------------
-
+            # -----------------------------------
+            # STEP 4: BM25
+            # -----------------------------------
             sparse_documents = self._bm25_search(
                 query=query,
                 documents=dense_documents,
                 k=dense_k,
             )
 
-            # -------------------------------
-            # RRF
-            # -------------------------------
-
+            # -----------------------------------
+            # STEP 5: RRF + CATEGORY BOOST
+            # -----------------------------------
             fused_docs = self._rrf_fusion(
                 dense_documents,
                 sparse_documents,
+                detected_category or category,
             )
 
             return fused_docs[:k]
 
         except Exception as e:
-            log.error(
-                "Hybrid product retrieval failed",
-                exc_info=True,
-            )
+            log.error("Hybrid V2 retrieval failed", exc_info=True)
 
             raise ProductAssistantException(
-                "Hybrid product retrieval execution failed",
+                "Hybrid V2 retrieval execution failed",
                 e,
             )
 
     # =================================================
-    # NEW — FETCH MANY (FOR BRANDS / CATALOG)
+    # CATEGORY DETECTION
     # =================================================
 
-    def retrieve_many(
-        self,
-        k: int = 200,
-        filters: Optional[Dict] = None,
-    ) -> List[Dict]:
+    async def _detect_category(self, query: str) -> Optional[str]:
+        try:
+            query = query.lower()
 
-        filters = filters or {}
+            categories = self.get_unique_metadata("category", k=200)
 
-        log.info(
-            "Retrieving many products",
-            k=k,
-            filters=filters,
-        )
+            for cat in categories:
+                if cat.lower() in query:
+                    return cat
 
-        matches = self.store.search(
-            query="*",
-            top_k=k,
-            filters=filters,
-        )
+            return None
 
-        return matches
+        except Exception:
+            return None
 
     # =================================================
-    # NEW — GET UNIQUE METADATA VALUES
+    # FETCH METADATA VALUES
     # =================================================
 
-    def get_unique_metadata(
-        self,
-        field: str,
-        k: int = 200,
-    ) -> List[str]:
-
-        matches = self.retrieve_many(k=k)
+    def get_unique_metadata(self, field: str, k: int = 200) -> List[str]:
+        matches = self.store.search(query="*", top_k=k)
 
         values = set()
 
         for m in matches:
-            meta = m.get("metadata", {})
-            val = meta.get(field)
-
+            val = m.get("metadata", {}).get(field)
             if val:
                 values.add(str(val))
 
-        return sorted(list(values))
+        return list(values)
 
     # =================================================
-    # SPARSE TEXT
+    # BETTER SPARSE TEXT
     # =================================================
 
-    def _build_sparse_text(
-        self,
-        metadata: Dict,
-    ) -> str:
-
+    def _build_sparse_text(self, metadata: Dict) -> str:
         return f"""
-        {metadata.get('category', '')}
-        {metadata.get('sub_category', '')}
-        {metadata.get('brand', '')}
-        {metadata.get('price', '')}
-        {metadata.get('rating', '')}
+        category: {metadata.get('category', '')}
+        subcategory: {metadata.get('sub_category', '')}
+        brand: {metadata.get('brand', '')}
         """
 
     # =================================================
@@ -265,26 +240,34 @@ class HybridProductRetriever:
         return [documents[i] for i in top_indices]
 
     # =================================================
-    # RRF
+    # RRF + CATEGORY BOOST
     # =================================================
 
     def _rrf_fusion(
         self,
         dense_docs: List[Document],
         sparse_docs: List[Document],
+        detected_category: Optional[str] = None,
     ) -> List[Document]:
 
         score_dict = defaultdict(float)
 
+        # Dense scores
         for rank, doc in enumerate(dense_docs):
             score_dict[id(doc)] += 1 / (self.rrf_k + rank)
 
+        # Sparse scores
         for rank, doc in enumerate(sparse_docs):
             score_dict[id(doc)] += 1 / (self.rrf_k + rank)
 
+        # CATEGORY BOOST
+        if detected_category:
+            for doc in dense_docs:
+                if doc.metadata.get("category") == detected_category:
+                    score_dict[id(doc)] += self.category_boost
+
         unique_docs = {
-            id(doc): doc
-            for doc in dense_docs + sparse_docs
+            id(doc): doc for doc in dense_docs + sparse_docs
         }
 
         sorted_docs = sorted(
@@ -306,29 +289,42 @@ class HybridProductRetriever:
         min_price,
         max_price,
         min_rating,
-    ) -> Optional[Dict]:
+        ) -> Optional[Dict]:
 
         filter_dict = {}
 
+        # -----------------------------
+        # CATEGORY
+        # -----------------------------
         if category:
             filter_dict["category"] = {"$eq": category}
 
+        # -----------------------------
+        # BRAND
+        # -----------------------------
         if brand:
             filter_dict["brand"] = {"$eq": brand}
 
+        # -----------------------------
+        # PRICE (VECTOR FILTER)
+        # -----------------------------
         if min_price is not None or max_price is not None:
 
             price_filter = {}
 
             if min_price is not None:
-                price_filter["$gte"] = min_price
+                price_filter["$gte"] = float(min_price)
 
             if max_price is not None:
-                price_filter["$lte"] = max_price
+                price_filter["$lte"] = float(max_price)
 
-            filter_dict["price"] = price_filter
+            if price_filter:
+                filter_dict["price"] = price_filter
 
+        # -----------------------------
+        # RATING
+        # -----------------------------
         if min_rating is not None:
-            filter_dict["rating"] = {"$gte": min_rating}
+            filter_dict["rating"] = {"$gte": float(min_rating)}
 
         return filter_dict if filter_dict else None
