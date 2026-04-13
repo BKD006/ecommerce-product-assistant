@@ -23,7 +23,7 @@ class QueryUnderstanding:
                 raise ProductAssistantException("Empty query")
 
             q = query.lower()
-
+            aggregation_type = self._detect_aggregation(q)
             # LLM-based parsing
             parsed = self._parse_with_llm(query)
 
@@ -34,16 +34,7 @@ class QueryUnderstanding:
                 fallback_min, fallback_max = self._extract_price(q)
                 parsed["price_min"] = fallback_min
                 parsed["price_max"] = fallback_max
-
-            # -----------------------------------
-            # DISABLE FILTERS FOR AGGREGATION
-            # -----------------------------------
-            if parsed["intent"] == "aggregation":
-                parsed["category"] = None
-                parsed["brand"] = None
-                parsed["price_min"] = None
-                parsed["price_max"] = None
-
+                
             # -----------------------------------
             # CLEAN QUERY
             # -----------------------------------
@@ -51,6 +42,7 @@ class QueryUnderstanding:
 
             result = {
                 **parsed,
+                "aggregation_type": aggregation_type,
                 "raw_query": query,
                 "clean_query": clean_query,
             }
@@ -68,7 +60,7 @@ class QueryUnderstanding:
     # =====================================================
 
     def _parse_with_llm(self, query: str) -> Dict[str, Any]:
-        prompt = intent_classifier.format(user_query=query)
+        prompt = intent_classifier(user_query=query)
 
         try:
             response = self.llm.invoke(prompt, temperature=0).content
@@ -95,10 +87,23 @@ class QueryUnderstanding:
     # OPTIONAL: CATEGORY DETECTION (KEEP OR REMOVE)
     # =====================================================
 
-    def _detect_category(self, q: str) -> Optional[str]:
+    def _detect_category(self, q: str):
+
+        mapping = {
+            "shoes": "Footwear",
+            "shoe": "Footwear",
+            "tshirt": "Clothing",
+            "shirt": "Clothing",
+        }
+
+        for key, value in mapping.items():
+            if key in q:
+                return value
+
         for cat in self.known_categories:
             if cat.lower() in q:
                 return cat
+
         return None
 
     # =====================================================
@@ -146,3 +151,18 @@ class QueryUnderstanding:
 
         return q.strip()
 
+    def _detect_aggregation(self, q: str) -> Optional[str]:
+
+        if "cheapest" in q or "lowest" in q:
+            return "min_price"
+
+        if "expensive" in q or "highest" in q:
+            return "max_price"
+
+        if "average" in q or "avg" in q:
+            return "avg_price"
+
+        if "brand" in q or "brands" in q:
+            return "brand_list"
+
+        return None
