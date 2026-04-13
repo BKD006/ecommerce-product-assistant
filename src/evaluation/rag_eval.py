@@ -1,103 +1,139 @@
-import asyncio
-from utils.model_loader import ModelLoader
-from ragas import SingleTurnSample
-from ragas.llms import LangchainLLMWrapper
-from ragas.embeddings import LangchainEmbeddingsWrapper
-from ragas.metrics import LLMContextPrecisionWithoutReference, ResponseRelevancy
+import json
+import numpy as np
+from typing import Dict, Any
+from src.agent.prompts import evaluation_prompt
 
+class RAGEvaluator:
 
-def evaluate_context_precision(query: str, response: str, retrieved_context: list) -> float:
-    """
-    Evaluate the context precision metric for a given query-response pair.
+    def __init__(
+        self,
+        embedding_model=None,
+        llm=None
+    ):
+        self.embedding_model = embedding_model
+        self.llm = llm
 
-    This function measures the precision of the retrieved context using the
-    LLMContextPrecisionWithoutReference metric from RAGAS.
+    # =====================================================
+    # CONTEXT BUILDER
+    # =====================================================
 
-    Args:
-        query (str): The user query.
-        response (str): The generated LLM response.
-        retrieved_context (list): List of retrieved contexts used for RAG.
+    def _build_context(self, state: Dict[str, Any]) -> str:
 
-    Returns:
-        float: The context precision score (0 to 1).
-    
-    Raises:
-        Exception: In case of evaluation failure.
-    """
-    try:
-        # Prepare the sample for evaluation
-        sample = SingleTurnSample(
-            user_input=query,
-            response=response,
-            retrieved_contexts=retrieved_context,
-        )
+        chunks = []
 
-        async def main():
-            # Load a language model and wrap it
-            llm = ModelLoader.load_llm()
-            evaluator_llm = LangchainLLMWrapper(llm)
+        for item in (state.get("product_results") or []):
+            if isinstance(item, dict) and item.get("content"):
+                chunks.append(item["content"])
 
-            # Initialize the Context Precision evaluator
-            context_precision_metric = LLMContextPrecisionWithoutReference(llm=evaluator_llm)
+        for item in (state.get("policy_results") or []):
+            if isinstance(item, dict) and item.get("content"):
+                chunks.append(item["content"])
 
-            # Compute precision score
-            score = await context_precision_metric.single_turn_ascore(sample)
-            return score
+        return " ".join(chunks).strip()
 
-        # Run the async evaluation
-        return asyncio.run(main())
+    # =====================================================
+    # HEURISTIC GROUNDING
+    # =====================================================
 
-    except Exception as e:
-        return e
+    def _grounding_score(self, answer: str, context: str):
 
+        if not context:
+            return 0.0, True
 
-def evaluate_response_relevancy(query: str, response: str, retrieved_context: list) -> float:
-    """
-    Evaluate the response relevancy of a generated answer to a user query.
+        answer_tokens = set(answer.lower().split())
+        context_tokens = set(context.lower().split())
 
-    This function measures how relevant the answer is to the query in the context
-    of the retrieved documents using the ResponseRelevancy metric from RAGAS.
+        overlap = answer_tokens.intersection(context_tokens)
+        coverage = len(overlap) / max(len(answer_tokens), 1)
 
-    Args:
-        query (str): The original user query.
-        response (str): The generated LLM response.
-        retrieved_context (list): List of retrieved contexts used for RAG.
+        return round(coverage, 3), coverage < 0.2
 
-    Returns:
-        float: The response relevancy score (0 to 1).
-    
-    Raises:
-        Exception: In case of evaluation failure.
-    """
-    try:
-        # Prepare the sample for evaluation
-        sample = SingleTurnSample(
-            user_input=query,
-            response=response,
-            retrieved_contexts=retrieved_context,
-        )
+    # =====================================================
+    # SEMANTIC SIMILARITY
+    # =====================================================
 
-        async def main():
-            # Load LLM for scoring
-            llm = ModelLoader.load_llm()
-            evaluator_llm = LangchainLLMWrapper(llm)
+    def _semantic_similarity(self, answer: str, context: str):
 
-            # Load embedding model for semantic comparison
-            embedding_model = ModelLoader.load_embeddings()
-            evaluator_embeddings = LangchainEmbeddingsWrapper(embedding_model)
+        if not self.embedding_model or not context:
+            return 0.0
 
-            # Initialize relevancy scorer
-            relevancy_scorer = ResponseRelevancy(
-                llm=evaluator_llm,
-                embeddings=evaluator_embeddings
+        try:
+            a = np.array(self.embedding_model.embed_query(answer))
+            c = np.array(self.embedding_model.embed_query(context))
+
+            sim = np.dot(a, c) / (
+                np.linalg.norm(a) * np.linalg.norm(c)
             )
 
-            # Compute relevancy score
-            score = await relevancy_scorer.single_turn_ascore(sample)
-            return score
+            return float(sim)
 
-        # Execute the async evaluator
-        return asyncio.run(main())
+        except Exception:
+            return 0.0
 
-    except Exception as e:
-        return e
+    # =====================================================
+    # LLM-AS-JUDGE
+    # =====================================================
+
+    def _llm_judge(self, query: str, answer: str, context: str):
+
+        if not self.llm or not context:
+            return {
+                "llm_score": 0.0,
+                "llm_verdict": "skipped",
+                "llm_reason": "LLM not available or no context",
+            }
+
+        prompt = evaluation_prompt(query, answer, context)
+
+        try:
+            response = self.llm.invoke(prompt, temperature=0)
+            parsed = json.loads(response.content.strip())
+
+            return {
+                "llm_score": parsed.get("score", 0.0),
+                "llm_verdict": parsed.get("verdict", "unknown"),
+                "llm_reason": parsed.get("reason", ""),
+            }
+
+        except Exception:
+            return {
+                "llm_score": 0.0,
+                "llm_verdict": "error",
+                "llm_reason": "Failed to parse LLM response",
+            }
+
+    # =====================================================
+    # MAIN EVALUATE
+    # =====================================================
+
+    def evaluate(
+        self,
+        state: Dict[str, Any],
+        query: str,
+        answer: str,
+        use_llm: bool = False
+    ) -> Dict[str, Any]:
+
+        context = self._build_context(state)
+
+        grounding_score, hallucination_flag = self._grounding_score(
+            answer, context
+        )
+
+        similarity = self._semantic_similarity(
+            answer, context
+        )
+
+        result = {
+            "grounding_score": grounding_score,
+            "hallucination_flag": hallucination_flag,
+            "semantic_similarity": round(similarity, 3),
+            "context_length": len(context),
+        }
+
+        if use_llm:
+            result.update(
+                self._llm_judge(query, answer, context)
+            )
+
+        return result
