@@ -49,6 +49,11 @@ class AgentState(TypedDict, total=False):
 
     citations: Optional[Dict[str, Any]]
 
+    # ===============================
+    # TRACEABILITY
+    # ===============================
+    request_id: Optional[str]
+
 # ===============================
 # FastAPI Schemas
 # ===============================
@@ -63,3 +68,5 @@ class ChatResponse(BaseModel):
     answer: str
     session_id: str
     citations: Optional[Dict[str, Any]] = None
+    type: Optional[str] = None
+    data: Optional[Any] = None
