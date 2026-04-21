@@ -1,95 +1,78 @@
-import json
-import time
-from typing import List, Dict, Optional
-import os
-import redis
+from datetime import datetime
+from typing import Dict, Optional
+
+from cachetools import TTLCache
 
 from src.logger import GLOBAL_LOGGER as log
 from src.exception.custom_exception import ProductAssistantException
 from src.utils.model_loader import ModelLoader
-from dotenv import load_dotenv
-load_dotenv()
 
-class RedisMemoryManager:
+
+class InMemoryCacheManager:
     """
-    Production-grade Redis-based session memory manager.
-
-    Supports:
-    - Sliding window conversation memory
-    - Auto summarization after threshold
-    - TTL-based session expiry
+    In-memory memory using cachetools.TTLCache
     """
 
     def __init__(
         self,
-        redis_url: str= os.getenv("REDIS_URL"),
-        ttl_seconds: int = 86400,  # 24 hours
-        max_messages: int = 8,
-        summarize_threshold: int = 12,
+        ttl_seconds=3600,
+        max_sessions=1000,
+        max_messages=10,
+        summarize_every=10,
     ):
         try:
-            self.redis_client = redis.from_url(redis_url,
-                                                decode_responses=True,
-                                                socket_timeout=5,
-                                                socket_connect_timeout=5,
-                                                retry_on_timeout=True,
-                                                )
-            self.ttl = ttl_seconds
+            # TTL + max size cache
+            self.cache = TTLCache(
+                maxsize=max_sessions,
+                ttl=ttl_seconds,
+            )
+
             self.max_messages = max_messages
-            self.summarize_threshold = summarize_threshold
+            self.summarize_every = summarize_every
 
             self.llm = ModelLoader().load_llm()
 
-            log.info("RedisMemoryManager initialized")
+            log.info("InMemoryCacheManager initialized")
 
         except Exception as e:
             raise ProductAssistantException(
-                "Failed initializing RedisMemoryManager", e
+                "Failed initializing InMemoryCacheManager",
+                e,
             )
 
     # =====================================================
-    # REDIS KEY
-    # =====================================================
-
-    def _key(self, session_id: str) -> str:
-        return f"memory:{session_id}"
-
-    # =====================================================
-    # LOAD MEMORY
+    # LOAD
     # =====================================================
 
     def load(self, session_id: str) -> Dict:
         try:
-            raw = self.redis_client.get(self._key(session_id))
-
-            if not raw:
-                return {
+            return self.cache.get(
+                session_id,
+                {
                     "messages": [],
                     "summary": "",
-                }
-
-            data = json.loads(raw)
-            return data
+                    "updated_at": "",
+                },
+            )
 
         except Exception as e:
+            log.error("memory_load_failed", exc_info=True)
             raise ProductAssistantException("Memory load failed", e)
 
     # =====================================================
-    # SAVE MEMORY
+    # SAVE
     # =====================================================
 
-    def _save(self, session_id: str, data: Dict) -> None:
+    def _save(self, session_id: str, data: Dict):
         try:
-            self.redis_client.setex(
-                self._key(session_id),
-                self.ttl,
-                json.dumps(data),
-            )
+            self.cache[session_id] = data
+
         except Exception as e:
+            log.error("memory_save_failed", exc_info=True)
             raise ProductAssistantException("Memory save failed", e)
 
     # =====================================================
-    # APPEND NEW MESSAGE
+    # APPEND
     # =====================================================
 
     def append(
@@ -97,23 +80,44 @@ class RedisMemoryManager:
         session_id: str,
         user_message: str,
         assistant_message: str,
-    ) -> None:
+        tool_used: Optional[str] = None,
+        citations: Optional[Dict] = None,
+    ):
         try:
             memory = self.load(session_id)
-
             messages = memory.get("messages", [])
 
-            messages.append({"role": "user", "content": user_message})
-            messages.append({"role": "assistant", "content": assistant_message})
+            now = datetime.utcnow().isoformat()
+
+            # user
+            messages.append({
+                "role": "user",
+                "content": user_message,
+                "time": now,
+                "meta": {},
+            })
+
+            # assistant
+            messages.append({
+                "role": "assistant",
+                "content": assistant_message,
+                "time": now,
+                "meta": {
+                    "tool": tool_used,
+                    "citations": citations or {},
+                },
+            })
 
             memory["messages"] = messages
 
-            # Summarize if needed
-            if len(messages) >= self.summarize_threshold:
+            # summarization trigger
+            if len(messages) > self.summarize_every:
                 memory = self._summarize(memory)
 
-            # Apply sliding window
-            memory["messages"] = memory["messages"][-self.max_messages :]
+            # keep last N
+            memory["messages"] = memory["messages"][-self.max_messages:]
+
+            memory["updated_at"] = now
 
             self._save(session_id, memory)
 
@@ -125,69 +129,81 @@ class RedisMemoryManager:
             )
 
         except Exception as e:
+            log.error("memory_append_failed", exc_info=True)
             raise ProductAssistantException("Memory append failed", e)
 
     # =====================================================
-    # SUMMARIZATION
+    # SUMMARIZE
     # =====================================================
 
-    def _summarize(self, memory: Dict) -> Dict:
+    def _summarize(self, memory: Dict):
         try:
             messages = memory.get("messages", [])
-            existing_summary = memory.get("summary", "")
+            summary = memory.get("summary", "")
 
-            conversation_text = ""
+            if len(messages) <= self.max_messages:
+                return memory
 
-            if existing_summary:
-                conversation_text += f"Previous Summary:\n{existing_summary}\n\n"
+            old = messages[:-self.max_messages]
+            recent = messages[-self.max_messages:]
 
-            for msg in messages:
-                conversation_text += f"{msg['role']}: {msg['content']}\n"
+            text = ""
+
+            if summary:
+                text += f"Previous summary:\n{summary}\n\n"
+
+            for m in old:
+                text += f"{m['role']}: {m['content']}\n"
 
             prompt = f"""
-Summarize the following conversation briefly while preserving important context:
+                        Summarize the conversation briefly.
+                        Keep important facts, user intent, and decisions.
 
-{conversation_text}
+                        {text}
 
-Summary:
-"""
+                        Summary:
+                    """
 
-            response = self.llm.invoke(prompt)
-            summary_text = response.content.strip()
+            res = self.llm.invoke(prompt)
 
-            # After summarizing, reset message history
-            memory["summary"] = summary_text
-            memory["messages"] = []
+            memory["summary"] = res.content.strip()
+            memory["messages"] = recent
 
-            log.info("memory_summarized")
+            log.info(
+                "memory_summarized",
+                old_count=len(old),
+                kept=len(recent),
+            )
 
             return memory
 
         except Exception as e:
+            log.error("memory_summarize_failed", exc_info=True)
             raise ProductAssistantException("Memory summarization failed", e)
 
     # =====================================================
-    # BUILD CONTEXT FOR PROMPT INJECTION
+    # CONTEXT
     # =====================================================
 
     def build_context(self, session_id: str) -> str:
-        """
-        Returns formatted conversation memory to inject into prompt.
-        """
+        try:
+            memory = self.load(session_id)
 
-        memory = self.load(session_id)
+            summary = memory.get("summary", "")
+            messages = memory.get("messages", [])
 
-        summary = memory.get("summary", "")
-        messages = memory.get("messages", [])
+            context = ""
 
-        context = ""
+            if summary:
+                context += f"Conversation Summary:\n{summary}\n\n"
 
-        if summary:
-            context += f"Conversation Summary:\n{summary}\n\n"
+            if messages:
+                context += "Recent Conversation:\n"
+                for m in messages:
+                    context += f"{m['role']}: {m['content']}\n"
 
-        if messages:
-            context += "Recent Conversation:\n"
-            for msg in messages:
-                context += f"{msg['role']}: {msg['content']}\n"
+            return context.strip()
 
-        return context.strip()
+        except Exception as e:
+            log.error("memory_context_failed", exc_info=True)
+            raise ProductAssistantException("Memory context build failed", e)
