@@ -1,5 +1,5 @@
 import json
-from typing import Literal
+from typing import Literal, Optional
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage
 from src.schemas.models import AgentState
@@ -33,9 +33,10 @@ class NovacartAgent:
     # PUBLIC RUN (ObservedAgent usually calls nodes)
     # =================================================
 
-    def run(self, user_query: str):
+    def run(self, user_query: str, request_id: Optional[str] = None):
 
         initial_state: AgentState = {
+            "request_id": request_id,
             "user_query": user_query,
             "messages": [],
             "iteration": 0,
@@ -63,6 +64,7 @@ class NovacartAgent:
 
     def _reason_node(self, state):
 
+        request_id = state.get("request_id")
         raw_query = state.get("raw_query", state["user_query"])
 
         # ---------------------------------------
@@ -70,7 +72,7 @@ class NovacartAgent:
         # ---------------------------------------
         parsed = self.query_understanding.parse(raw_query)
 
-        log.info("Parsed Query", parsed=parsed)
+        log.info("Parsed Query", request_id=request_id, parsed=parsed)
 
         intent = parsed.get("intent")
 
@@ -111,6 +113,7 @@ class NovacartAgent:
 
     def _tool_node(self, state: AgentState) -> AgentState:
 
+        request_id = state.get("request_id")
         action = state.get("next_action")
         query = state.get("tool_query", state["user_query"])
         parsed = state.get("parsed", {})
@@ -134,7 +137,7 @@ class NovacartAgent:
             if v is not None
         }
 
-        log.info("Filters Applied", filters=filters)
+        log.info("Filters Applied", request_id=request_id, filters=filters)
 
         try:
             # =====================================================
@@ -145,14 +148,16 @@ class NovacartAgent:
                 results = self.tool_registry.execute(
                     "product_tool",
                     query=query,
-                    filters=filters
+                    filters=filters,
+                    request_id=request_id
                 )
                 state["product_results"] = results
 
             elif action == "policy_tool":
                 results = self.tool_registry.execute(
                     "policy_tool",
-                    query=query
+                    query=query,
+                    request_id=request_id
                 )
                 state["policy_results"] = results
 
@@ -181,6 +186,7 @@ class NovacartAgent:
 
     def _final_node(self, state: AgentState) -> AgentState:
 
+        request_id = state.get("request_id")
         product_results = state.get("product_results") or []
         policy_results = state.get("policy_results") or []
 
@@ -197,6 +203,7 @@ class NovacartAgent:
         formatted_policies = []
         source_map = {}
         counter = 1
+        log.info("Final node started",request_id=request_id,product_count=len(product_results),policy_count=len(policy_results))
 
         # -------- products --------
         for p in product_results:
