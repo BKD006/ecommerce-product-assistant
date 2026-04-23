@@ -1,6 +1,8 @@
 import requests
 import streamlit as st
 
+import pandas as pd
+
 API_URL = "http://localhost:8000/api"
 
 st.set_page_config(
@@ -37,7 +39,7 @@ def chat_api(query):
         )
 
         if r.status_code == 200:
-            return r.json().get("answer", "No response")
+            return r.json()
 
         return f"❌ Error: {r.text}"
 
@@ -79,24 +81,6 @@ def upload_policy(file):
         return str(e)
 
 
-# 🔥 NEW (SQLite ingestion)
-def upload_sqlite(file):
-
-    files = {
-        "file": (file.name, file.getvalue(), "text/csv")
-    }
-
-    try:
-        r = requests.post(
-            f"{API_URL}/sqlite/ingest",
-            files=files,
-        )
-        return r.json() if r.status_code == 200 else r.text
-
-    except Exception as e:
-        return str(e)
-
-
 # =========================
 # SIDEBAR
 # =========================
@@ -116,21 +100,6 @@ with st.sidebar:
         if csv_file:
             with st.spinner("Uploading to Pinecone..."):
                 res = upload_product(csv_file)
-            st.json(res)
-
-    st.divider()
-
-    # -------------------------
-    # SQLITE INGESTION
-    # -------------------------
-    st.subheader("🗄️ Upload Product CSV (SQLite)")
-
-    sqlite_file = st.file_uploader("CSV file", type=["csv"], key="sqlite")
-
-    if st.button("Ingest to SQLite"):
-        if sqlite_file:
-            with st.spinner("Ingesting into SQLite..."):
-                res = upload_sqlite(sqlite_file)
             st.json(res)
 
     st.divider()
@@ -186,20 +155,31 @@ for msg in st.session_state.messages:
         col1, col2 = st.columns([7, 3])
 
         with col1:
-            st.markdown(
-                f"""
-                <div style="
-                    background-color:#111827;
-                    padding:10px;
-                    border-radius:10px;
-                    text-align:left;
-                ">
-                {msg["content"]}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
 
+            content = msg["content"]
+
+            # TABLE RENDER
+            if isinstance(content, dict) and content.get("type") == "table":
+                df = pd.DataFrame(content.get("data", []))
+                st.dataframe(df, use_container_width=True)
+
+            # TEXT RENDER
+            else:
+                answer = content.get("answer") if isinstance(content, dict) else content
+
+                st.markdown(
+                    f"""
+                    <div style="
+                        background-color:#111827;
+                        padding:10px;
+                        border-radius:10px;
+                        text-align:left;
+                    ">
+                    {answer}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
 # =========================
 # INPUT
@@ -231,25 +211,32 @@ if prompt := st.chat_input("Ask something..."):
 
     # ASSISTANT RESPONSE
     with st.spinner("Thinking..."):
-        answer = chat_api(prompt)
+        response = chat_api(prompt)
 
     col1, col2 = st.columns([7, 3])
 
     with col1:
-        st.markdown(
-            f"""
-            <div style="
-                background-color:#111827;
-                padding:10px;
-                border-radius:10px;
-                text-align:left;
-            ">
-            {answer}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        if isinstance(response, dict) and response.get("type") == "table":
+            df = pd.DataFrame(response.get("data", []))
+            st.dataframe(df, use_container_width=True)
+
+        else:
+            answer = response.get("answer") if isinstance(response, dict) else str(response)
+
+            st.markdown(
+                f"""
+                <div style="
+                    background-color:#111827;
+                    padding:10px;
+                    border-radius:10px;
+                    text-align:left;
+                ">
+                {answer}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
     st.session_state.messages.append(
-        {"role": "assistant", "content": answer}
+        {"role": "assistant", "content": response}
     )
