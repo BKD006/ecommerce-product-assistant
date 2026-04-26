@@ -1,8 +1,7 @@
 import time
 import uuid
 import os
-from typing import Dict, Any, Optional
-import numpy as np
+from typing import Optional
 
 from langsmith import traceable
 from langsmith.run_helpers import trace, get_current_run_tree
@@ -11,8 +10,8 @@ from src.agent.graph import NovacartAgent
 from src.utils.model_loader import ModelLoader
 from src.logger import GLOBAL_LOGGER as log
 from src.exception.custom_exception import ProductAssistantException
-
-from src.memory.redis_memory_manager import RedisMemoryManager
+from src.evaluation.rag_eval import RAGEvaluator
+from src.memory.cache_manager import InMemoryCacheManager
 from src.memory.mongodb_memory_manager import MongoConversationManager
 from dotenv import load_dotenv
 load_dotenv()
@@ -22,11 +21,11 @@ class ObservedAgent:
     def __init__(
         self,
         agent: NovacartAgent,
-        memory_manager: Optional[RedisMemoryManager] = None,
+        memory_manager: Optional[InMemoryCacheManager] = None,
     ):
 
         self.agent = agent
-        self.memory_manager = memory_manager or RedisMemoryManager()
+        self.memory_manager = memory_manager or InMemoryCacheManager()
 
         # Mongo = source of truth
         self.mongo_manager = MongoConversationManager(
@@ -36,89 +35,11 @@ class ObservedAgent:
 
         loader = ModelLoader()
         self.embedding_model = loader.load_embeddings("policy")
-
-    # =====================================================
-    # HALLUCINATION CHECK
-    # =====================================================
-
-    def _hallucination_check(
-        self,
-        state: Dict[str, Any],
-        answer: str,
-        memory_message_count: int,
-    ):
-
-        product_results = state.get("product_results") or []
-        policy_results = state.get("policy_results") or []
-
-        retrieved_text = ""
-
-        for r in product_results:
-            retrieved_text += " " + (r.get("content") or "")
-
-        for r in policy_results:
-            retrieved_text += " " + (r.get("content") or "")
-
-        # allow memory answers
-        if not retrieved_text.strip():
-
-            if memory_message_count > 0:
-                return {
-                    "risk_score": 0.2,
-                    "semantic_similarity": 0.0,
-                    "flag": False,
-                }
-
-            return {
-                "risk_score": 0.9,
-                "semantic_similarity": 0.0,
-                "flag": True,
-            }
-
-        try:
-
-            answer_vector = np.array(
-                self.embedding_model.embed_query(answer)
-            )
-
-            context_vector = np.array(
-                self.embedding_model.embed_query(retrieved_text)
-            )
-
-            similarity = np.dot(answer_vector, context_vector) / (
-                np.linalg.norm(answer_vector)
-                * np.linalg.norm(context_vector)
-            )
-
-            similarity = float(similarity)
-
-            if similarity > 0.80:
-                risk_score = 0.1
-            elif similarity > 0.65:
-                risk_score = 0.4
-            elif similarity > 0.50:
-                risk_score = 0.7
-            else:
-                risk_score = 0.9
-
-            return {
-                "risk_score": round(risk_score, 3),
-                "semantic_similarity": round(similarity, 3),
-                "flag": risk_score >= 0.6,
-            }
-
-        except Exception:
-
-            return {
-                "risk_score": 0.5,
-                "semantic_similarity": 0.0,
-                "flag": False,
-            }
+        self.evaluator = RAGEvaluator(embedding_model=self.embedding_model, llm=ModelLoader().load_llm())
 
     # =====================================================
     # MAIN RUN
     # =====================================================
-
     @traceable(name="ObservedAgentRun")
     def run(self, query: str, session_id: Optional[str] = None):
 
@@ -133,78 +54,33 @@ class ObservedAgent:
         )
 
         try:
-
             # =================================================
-            # MEMORY LOAD
+            # MEMORY LOAD (ONLY InMemory)
             # =================================================
-
             memory_context = ""
-            memory_message_count = 0
-            summary_used = False
 
             if session_id:
-
                 with trace("memory_load"):
-
-                    memory_data = self.memory_manager.load(session_id)
-
-                    # fallback to mongo
-                    if (
-                        not memory_data["messages"]
-                        and not memory_data["summary"]
-                    ):
-
-                        mongo_messages = self.mongo_manager.get_conversation(
-                            session_id
-                        )
-
-                        last_user = None
-
-                        for m in mongo_messages:
-
-                            if m["role"] == "user":
-                                last_user = m["content"]
-
-                            else:
-                                if last_user:
-                                    self.memory_manager.append(
-                                        session_id,
-                                        last_user,
-                                        m["content"],
-                                    )
-
-                        memory_data = self.memory_manager.load(session_id)
-
-                    memory_context = self.memory_manager.build_context(
-                        session_id
-                    )
-
-                    memory_message_count = len(
-                        memory_data.get("messages", [])
-                    )
-
-                    summary_used = bool(
-                        memory_data.get("summary")
-                    )
+                    memory_context = self.memory_manager.build_context(session_id)
 
             enriched_query = query
 
             if memory_context:
-
                 enriched_query = f"""
-Previous Conversation Context:
-{memory_context}
+                                Previous Conversation:
+                                {memory_context}
 
-Current User Query:
-{query}
-"""
+                                User Query:
+                                {query}
+                                """
 
             # =================================================
             # INITIAL STATE
             # =================================================
-
             state = {
+                "request_id": request_id,
                 "user_query": enriched_query,
+                "raw_query": query,
                 "messages": [],
                 "iteration": 0,
                 "max_iterations": self.agent.max_iterations,
@@ -221,7 +97,6 @@ Current User Query:
             # =================================================
             # REASON
             # =================================================
-
             with trace("reason_stage"):
                 state = self.agent._reason_node(state)
 
@@ -230,42 +105,112 @@ Current User Query:
             # =================================================
             # TOOL
             # =================================================
-
             if tool_name != "final":
-
                 with trace("tool_stage"):
                     state = self.agent._tool_node(state)
 
             # =================================================
             # FINAL
             # =================================================
-
             with trace("final_stage"):
                 state = self.agent._final_node(state)
 
             answer = state.get("final_answer", "")
+
+            # =================================================
+            # RAG EVALUATION (FULL)
+            # =================================================
+            evaluation = {}
+
+            try:
+                with trace("rag_evaluation"):
+                    evaluation = self.evaluator.evaluate(
+                        state=state,
+                        query=query,
+                        answer=answer,
+                        use_llm=True  
+                    )
+
+                    # BAD RESPONSE FLAG
+                    evaluation["is_bad"] = (
+                        evaluation.get("grounding_score", 0) < 0.2
+                        or evaluation.get("semantic_similarity", 0) < 0.5
+                        or evaluation.get("llm_score", 0) < 0.5
+                    )
+
+                    # RESPONSE QUALITY LOG
+                    log.info(
+                        "response_quality",
+                        request_id=request_id,
+                        is_bad=evaluation["is_bad"],
+                        grounding_score=evaluation.get("grounding_score"),
+                        semantic_similarity=evaluation.get("semantic_similarity"),
+                        llm_score=evaluation.get("llm_score"),
+                    )
+
+                    # ADD: BAD RESPONSE ALERT
+                    if evaluation["is_bad"]:
+                        log.warning(
+                            "bad_response_detected",
+                            request_id=request_id,
+                            query=query,
+                        )
+
+                    log.info(
+                        "rag_evaluation_completed",
+                        grounding_score=evaluation.get("grounding_score"),
+                        hallucination_flag=evaluation.get("hallucination_flag"),
+                        semantic_similarity=evaluation.get("semantic_similarity"),
+                        llm_score=evaluation.get("llm_score"),
+                        llm_verdict=evaluation.get("llm_verdict"),
+                    )
+
+            except Exception:
+                log.warning(
+                    "rag_evaluation_failed",
+                    exc_info=True
+                )
+                evaluation = {}
 
             total_latency = time.time() - start_total
 
             # =================================================
             # MEMORY SAVE
             # =================================================
-
             if session_id:
-
                 with trace("memory_update"):
 
                     self.mongo_manager.save_message(
                         session_id,
                         "user",
-                        query,
+                        {
+                            "request_id": request_id,
+                            "query": query
+                        }
                     )
 
                     self.mongo_manager.save_message(
                         session_id,
                         "assistant",
-                        answer,
+                        {
+                            "request_id": request_id,
+                            "answer": answer
+                        }
                     )
+
+                    if evaluation:
+                        try:
+                            self.mongo_manager.save_evaluation(
+                                    session_id=session_id,
+                                    evaluation={
+                                        "request_id": request_id,
+                                        "query": query,
+                                        "answer": answer,
+                                        **evaluation
+                                    }
+                                )
+                        except Exception:
+                            log.warning("Evaluation_storage_failed", exc_info=True)
 
                     self.memory_manager.append(
                         session_id=session_id,
@@ -274,61 +219,37 @@ Current User Query:
                     )
 
             # =================================================
-            # HALLUCINATION CHECK
+            # LANGSMITH METADATA
             # =================================================
-
-            hallucination_metrics = self._hallucination_check(
-                state,
-                answer,
-                memory_message_count,
-            )
-
             current_run = get_current_run_tree()
 
             if current_run:
-
                 current_run.metadata.update({
                     "request_id": request_id,
                     "tool_used": tool_name,
-                    "total_latency": round(total_latency, 4),
+                    "latency": round(total_latency, 4),
                     "session_id": session_id,
-                    "memory_message_count": memory_message_count,
-                    "memory_summary_used": summary_used,
-                    "hallucination_flag": hallucination_metrics["flag"],
-                    "hallucination_risk_score": hallucination_metrics["risk_score"],
+                    "evaluation": evaluation
                 })
 
             log.info(
                 "agent_request_completed",
                 request_id=request_id,
-                total_latency=round(total_latency, 4),
+                latency=round(total_latency, 4),
                 tool_used=tool_name,
-                hallucination_flag=hallucination_metrics["flag"],
-                memory_message_count=memory_message_count,
                 status="success",
             )
 
             return {
                 "answer": answer,
                 "citations": state.get("citations"),
+                "evaluation": evaluation
             }
 
-        except ProductAssistantException as e:
-
-            log.error(
-                "agent_request_failed",
-                request_id=request_id,
-                error=str(e),
-            )
-
-            raise
-
         except Exception as e:
-
             log.error(
-                "agent_unexpected_error",
+                "agent_failed",
                 request_id=request_id,
                 error=str(e),
             )
-
-            raise
+            raise ProductAssistantException("Agent failed", e)
