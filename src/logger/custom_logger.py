@@ -4,82 +4,112 @@ from datetime import datetime
 import structlog
 
 
+# ======================================================
+# DEBUG FLAG (from .env)
+# ======================================================
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+
+
+# ======================================================
+# CUSTOM FILTER (CORE LOGIC)
+# ======================================================
+class DebugFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+
+        message = record.getMessage()
+
+        # ALWAYS allow warnings/errors
+        if record.levelno >= logging.WARNING:
+            return True
+
+        # ALWAYS allow key business logs
+        important_keywords = [
+            "agent_request_started",
+            "agent_request_completed",
+            "response_quality",
+            "bad_response_detected",
+        ]
+
+        if any(k in message for k in important_keywords):
+            return True
+
+        # If DEBUG mode → allow everything
+        if DEBUG:
+            return True
+
+        # Drop noisy logs in production
+        noisy_keywords = [
+            "reason_node",
+            "tool_node",
+            "parsed",
+            "filters",
+            "state",
+            "documents",
+        ]
+
+        if any(k in message for k in noisy_keywords):
+            return False
+
+        return True
+
+
 class CustomLogger:
     """
-    A custom structured logging utility for Python applications.
-
-    This class sets up a logger that outputs **JSON-formatted logs**
-    to both the console and a timestamped log file. It uses the
-    `structlog` library to ensure that logs are structured, human-readable,
-    and machine-parsable for downstream processing (e.g., ELK, Datadog, CloudWatch).
-
-    Features:
-        - Creates a dedicated log directory (default: `./logs`)
-        - Generates timestamped log files
-        - Sends logs to both console and file in JSON format
-        - Includes UTC timestamps, log levels, and event names
+    Structured JSON logger with DEBUG-aware filtering.
     """
 
     def __init__(self, log_dir: str = "logs"):
-        """
-        Initialize the custom logger and ensure log directory setup.
-        """
-        # Ensure the logs directory exists (create if missing)
+
         self.logs_dir = os.path.join(os.getcwd(), log_dir)
         os.makedirs(self.logs_dir, exist_ok=True)
 
-        # Generate a timestamped log filename (e.g., 11_09_2025_16_40_00.log)
         log_file = f"{datetime.now().strftime('%m_%d_%Y_%H_%M_%S')}.log"
         self.log_file_path = os.path.join(self.logs_dir, log_file)
 
     def get_logger(self, name: str = __file__):
-        """
-        Create and configure a structured JSON logger.
 
-        Args:
-            name (str): Name of the logger (usually `__name__` or `__file__`).
-
-        Returns:
-            structlog.stdlib.BoundLogger: A structured logger instance.
-        """
         logger_name = os.path.basename(name)
 
+        # ======================================================
+        # LOG LEVEL CONTROL
+        # ======================================================
+        log_level = logging.DEBUG if DEBUG else logging.INFO
+
         # -----------------------
-        # Setup log file handler
+        # File handler
         # -----------------------
         file_handler = logging.FileHandler(self.log_file_path)
-        file_handler.setLevel(logging.INFO)
-        # Each log line will be raw JSON (structlog formats it)
+        file_handler.setLevel(log_level)
         file_handler.setFormatter(logging.Formatter("%(message)s"))
+        file_handler.addFilter(DebugFilter())   
 
         # -----------------------
-        # Setup console handler
+        # Console handler
         # -----------------------
         console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
+        console_handler.setLevel(log_level)
         console_handler.setFormatter(logging.Formatter("%(message)s"))
+        console_handler.addFilter(DebugFilter())   
 
         # -----------------------
-        # Base Python logging setup
+        # Root logger setup
         # -----------------------
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(message)s",  # structlog handles JSON formatting
-            handlers=[console_handler, file_handler],
-        )
+        root_logger = logging.getLogger()
+        root_logger.setLevel(log_level)
 
-        # -----------------------
-        # Structlog configuration
-        # -----------------------
+        # Prevent duplicate handlers
+        if not root_logger.handlers:
+            root_logger.addHandler(console_handler)
+            root_logger.addHandler(file_handler)
+
+        # ======================================================
+        # Structlog config
+        # ======================================================
         structlog.configure(
             processors=[
-                # Add UTC ISO8601 timestamps to logs
                 structlog.processors.TimeStamper(fmt="iso", utc=True, key="timestamp"),
-                # Include the log level (e.g., INFO, ERROR)
                 structlog.processors.add_log_level,
-                # Rename 'event' field for clarity in output
                 structlog.processors.EventRenamer(to="event"),
-                # Render final structured JSON
                 structlog.processors.JSONRenderer(),
             ],
             logger_factory=structlog.stdlib.LoggerFactory(),
