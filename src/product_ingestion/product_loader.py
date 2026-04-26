@@ -8,10 +8,6 @@ from typing import List, Dict, Any
 class ProductCatalogProcessor:
     """
     SINGLE SOURCE OF TRUTH for product ingestion.
-
-    Used by:
-    - Pinecone ingestion
-    - SQLite ingestion
     """
 
     def __init__(self, file_path: str):
@@ -22,9 +18,6 @@ class ProductCatalogProcessor:
     # =====================================================
 
     def process_df(self) -> pd.DataFrame:
-        """
-        Returns cleaned + validated + deduplicated DataFrame
-        """
 
         df = self._load_data()
         df = self._basic_cleaning(df)
@@ -34,7 +27,7 @@ class ProductCatalogProcessor:
         df = self._parse_specifications(df)
         df = self._validate_rows(df)
 
-        # ADD COMMON FEATURES (CRITICAL)
+        # ADD COMMON FEATURES
         df = self._add_common_features(df)
 
         return df
@@ -44,15 +37,10 @@ class ProductCatalogProcessor:
     # =====================================================
 
     def process(self) -> List[Dict[str, Any]]:
-        """
-        Backward-compatible method for Pinecone ingestion
-        """
 
         df = self.process_df()
         df = self._build_embedding_text(df)
         df = self._build_metadata(df)
-
-        final_df = df[["pid", "embedding_text", "metadata"]].copy()
 
         return [
             {
@@ -60,11 +48,11 @@ class ProductCatalogProcessor:
                 "embedding_text": row["embedding_text"],
                 "metadata": row["metadata"],
             }
-            for _, row in final_df.iterrows()
+            for _, row in df.iterrows()
         ]
 
     # =====================================================
-    # COMMON FEATURES (MOST IMPORTANT)
+    # COMMON FEATURES
     # =====================================================
 
     def _add_common_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -81,7 +69,7 @@ class ProductCatalogProcessor:
 
         df["content_hash"] = df.apply(generate_hash, axis=1)
 
-        # 🔥 GLOBAL DEDUP (THIS FIXES YOUR MISMATCH ISSUE)
+        # Deduplicate
         df = df.drop_duplicates(subset="content_hash")
 
         return df
@@ -99,25 +87,13 @@ class ProductCatalogProcessor:
         df = df[df["retail_price"].notna() | df["discounted_price"].notna()]
         df = df[df["description"].notna()]
 
-        columns_to_drop = [
-            "uniq_id",
-            "crawl_timestamp",
-            "product_url",
-            "image",
-            "is_FK_Advantage_product",
-        ]
-
-        df = df.drop(columns=columns_to_drop, errors="ignore")
-
         return df
 
     def _normalize_price(self, df: pd.DataFrame) -> pd.DataFrame:
 
         df["price"] = df["discounted_price"].fillna(df["retail_price"])
 
-        # 🔥 STRONG CLEANING (matches SQLite logic)
         df["price"] = df["price"].astype(str).str.replace(r"[^\d.]", "", regex=True)
-
         df["price"] = pd.to_numeric(df["price"], errors="coerce")
 
         df = df[df["price"].notna()]
@@ -160,14 +136,7 @@ class ProductCatalogProcessor:
             "product_category_tree"
         ].apply(lambda x: pd.Series(extract(x)))
 
-        # Keep only top 19 categories
-        top_categories = (
-            df["main_category"].value_counts().head(19).index
-        )
-
-        df = df[df["main_category"].isin(top_categories)].copy()
-
-        return df
+        return df.copy()
 
     def _parse_specifications(self, df: pd.DataFrame) -> pd.DataFrame:
 
@@ -209,29 +178,30 @@ class ProductCatalogProcessor:
 
         df = df[df["product_name"].str.len() > 3]
         df = df[df["description"].str.len() > 20]
-        df = df[df["description"].str.len() < 5000]
 
         return df
 
     # =====================================================
-    # BUILD EMBEDDING TEXT
+    # EMBEDDING TEXT (BOOSTED)
     # =====================================================
 
     def _build_embedding_text(self, df: pd.DataFrame) -> pd.DataFrame:
 
         def build_text(row):
-            specs_text = ""
 
+            specs_text = ""
             if isinstance(row["parsed_specs"], dict):
                 for k, v in row["parsed_specs"].items():
                     specs_text += f"{k}: {v}\n"
 
             text = f"""
-            Product: {row['product_name']}
+            Product Name: {row['product_name']}
+
             Brand: {row.get('brand', '')}
             Category: {row.get('main_category', '')}
             Subcategory: {row.get('sub_category', '')}
             Price: {row.get('price', '')}
+            Rating: {row.get('overall_rating', '')}
 
             Description:
             {row.get('description', '')}
@@ -247,7 +217,7 @@ class ProductCatalogProcessor:
         return df
 
     # =====================================================
-    # BUILD METADATA
+    # METADATA (UPDATED)
     # =====================================================
 
     def _build_metadata(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -256,6 +226,7 @@ class ProductCatalogProcessor:
 
             metadata = {
                 "product_id": str(row["pid"]),
+                "product_name": row.get("product_name"),
                 "category": row.get("main_category"),
                 "sub_category": row.get("sub_category"),
                 "brand": row.get("brand"),
@@ -279,3 +250,12 @@ class ProductCatalogProcessor:
         df["metadata"] = df.apply(build_metadata, axis=1)
 
         return df
+    
+
+# if __name__ == "__main__":
+#     processor = ProductCatalogProcessor(file_path=r"C:\Users\birok\Python\LLMOPs\ecommerce-product-assistant\data\flipkart_com-ecommerce.csv")
+#     processed_data = processor.process()
+#     with open("processed_products.json", "w") as f:
+#         import json
+#         json.dump(processed_data, f, indent=2)
+#     print(f"Processed {len(processed_data)} products for vector ingestion.")
